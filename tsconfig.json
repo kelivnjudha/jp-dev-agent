@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/protocol" },
+    { "path": "./packages/agent-api-client" },
     { "path": "./packages/device-storage" },
     { "path": "./packages/device-identity" },
     { "path": "./packages/agent-core" },

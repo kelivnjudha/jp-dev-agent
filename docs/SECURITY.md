@@ -7,16 +7,21 @@ requests that do not include valid approved device proof.
 
 ## Current Phase
 
-JPDEVAGENT-R3-B-B0 is scaffold-only.
+JPDEVAGENT-R3-B-D-B adds a typed client for the real Branch Device
+Registry device-side endpoints and aligns protocol DTOs with the API.
 
-- No production API calls.
+- No setup-code claim UI wiring yet.
+- No automatic pending activation polling.
+- No device session heartbeat loop.
 - No POS forwarding.
 - No printer bridge implementation.
 - No NFC hardware integration.
 - No Raspberry Pi kiosk mode.
 - No production secrets.
 
-The setup and activation buttons are local mock behavior for development only.
+The setup and activation buttons remain local mock behavior for development
+only. The new API client is available for the next integration phase but is
+not exposed through the renderer bridge.
 
 ## Setup-Code-First Rule
 
@@ -45,6 +50,35 @@ mechanism.
 
 Hardware fingerprint is advisory. It is not authentication.
 
+The API client maps the agent's local `publicKeyPem` value to the API's
+`publicKey` request field for setup-code claim. Private key material is never
+part of any device-side API DTO.
+
+## Device API Client Rules
+
+The device client is limited to these fixed endpoints:
+
+- `POST /api/v1/branch-devices/claim`
+- `POST /api/v1/branch-devices/session/challenge`
+- `POST /api/v1/branch-devices/session`
+- `POST /api/v1/branch-devices/heartbeat`
+
+The client:
+
+- builds URLs from `apiBaseUrl` plus fixed relative endpoint constants
+- rejects embedded URL credentials
+- does not accept arbitrary upstream paths from callers
+- whitelists setup-code claim payload fields
+- never accepts device-supplied capabilities
+- validates successful responses before returning them
+- maps HTTP/API errors to safe typed errors
+- does not log setup codes, public keys, private keys, signatures, hardware
+  fingerprint hashes, session tokens, or Authorization header values
+
+The raw device session token is returned only from the session issue function.
+It must be treated as memory-only sensitive data by later phases and must never
+be exposed to the Electron renderer.
+
 ## Local Proxy Rules
 
 The local proxy must:
@@ -63,6 +97,9 @@ Current endpoints:
 - `POST /proxy/test`
 
 `POST /proxy/test` is dev-only and does not forward to Jade-Palace-API.
+
+R3-B-D-B does not add proxy forwarding. Future forwarding remains gated on an
+active approved device session plus strict path/capability allowlists.
 
 ## Future Proxy Proof
 

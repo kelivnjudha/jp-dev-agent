@@ -1,12 +1,12 @@
 import type {
+  AgentRegistrationStatus,
   AgentMode,
   DeviceCapability,
   DeviceRegistrationSnapshot,
-  DeviceStatus,
 } from '@jade-dev-agent/protocol';
 
 export interface AgentState {
-  status: DeviceStatus;
+  status: AgentRegistrationStatus;
   mode: AgentMode;
   capabilities: DeviceCapability[];
   setupCodeMasked?: string;
@@ -56,7 +56,7 @@ export function enterSetupCode(
   }
   return {
     ...state,
-    status: 'SETUP_CODE_ENTERED',
+    status: 'SETUP_CODE_SUBMITTING',
     setupCodeMasked: maskSetupCode(trimmed),
     message: 'Setup code accepted locally. Claiming requires the future API.',
     updatedAt: new Date().toISOString(),

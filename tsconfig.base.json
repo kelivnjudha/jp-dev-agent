@@ -18,6 +18,7 @@
     "baseUrl": ".",
     "paths": {
       "@jade-dev-agent/protocol": ["packages/protocol/src/index.ts"],
+      "@jade-dev-agent/agent-api-client": ["packages/agent-api-client/src/index.ts"],
       "@jade-dev-agent/agent-core": ["packages/agent-core/src/index.ts"],
       "@jade-dev-agent/agent-proxy": ["packages/agent-proxy/src/index.ts"],
       "@jade-dev-agent/device-identity": ["packages/device-identity/src/index.ts"],

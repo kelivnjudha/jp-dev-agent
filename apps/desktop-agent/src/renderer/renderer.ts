@@ -65,16 +65,26 @@ function titleForStatus(status: DeviceRegistrationSnapshot['status']): string {
   switch (status) {
     case 'UNREGISTERED':
       return 'Setup Code Required';
-    case 'SETUP_CODE_ENTERED':
-      return 'Setup Code Entered';
+    case 'SETUP_CODE_SUBMITTING':
+      return 'Setup Code Submitting';
     case 'PENDING_ACTIVATION':
       return 'Waiting for Activation';
+    case 'ACTIVE_SESSION_CONNECTING':
+      return 'Connecting Device Session';
     case 'ACTIVE':
       return 'Device Active';
+    case 'SESSION_EXPIRED_RETRYING':
+      return 'Reconnecting Device Session';
     case 'DISABLED':
       return 'Device Disabled';
+    case 'DENIED':
+      return 'Device Denied';
+    case 'REVOKED':
+      return 'Device Revoked';
     case 'ERROR':
       return 'Device Error';
+    case 'RESET_REQUIRED':
+      return 'Device Reset Required';
     default:
       return 'Jade Device Agent';
   }
