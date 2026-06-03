@@ -17,9 +17,20 @@ hardware.
 9. Admin activates or denies.
 10. Active devices can obtain short-lived device sessions.
 
-The scaffold still simulates steps 4 through 9 locally. R3-B-D-B adds the typed
-device API client and protocol DTOs for real integration, but does not wire the
-renderer setup-code form to the API yet.
+R3-B-D-C implements steps 4 through 7 in the desktop Agent with the real
+setup-code claim API. Steps 8 through 10 remain deferred: there is no pending
+activation polling, challenge/sign/session loop, or heartbeat loop in this
+phase.
+
+After claim succeeds, the Agent displays Waiting for Admin Activation and tells
+operators to ask Main Admin or an authorized Admin to activate the device in
+JP Admin -> Branch -> Devices.
+
+The setup code is never persisted after submission. The pending activation file
+stores only device id, server status, branch summary, server-granted
+capabilities, safe HID prefix, optional sanitized device label, and claim time.
+It must not store setup codes, setup-code hashes, session tokens, token hashes,
+private/public keys, full hardware fingerprint hashes, or raw API responses.
 
 ## Device Types
 
@@ -137,8 +148,8 @@ Attendance checkpoint APIs should require:
 
 This phase intentionally defers:
 
-- real setup-code claim UI wiring
 - pending activation status polling
+- active device session challenge/sign/issue flow
 - session heartbeat loop
 - JPPOS proxy integration
 - POS API enforcement

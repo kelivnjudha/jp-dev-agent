@@ -7,11 +7,11 @@ requests that do not include valid approved device proof.
 
 ## Current Phase
 
-JPDEVAGENT-R3-B-D-B adds a typed client for the real Branch Device
-Registry device-side endpoints and aligns protocol DTOs with the API.
+JPDEVAGENT-R3-B-D-C wires the desktop Agent setup-code form to the real Branch
+Device Registry claim endpoint and shows a safe pending-activation state.
 
-- No setup-code claim UI wiring yet.
 - No automatic pending activation polling.
+- No active device session challenge/sign/issue loop.
 - No device session heartbeat loop.
 - No POS forwarding.
 - No printer bridge implementation.
@@ -19,9 +19,8 @@ Registry device-side endpoints and aligns protocol DTOs with the API.
 - No Raspberry Pi kiosk mode.
 - No production secrets.
 
-The setup and activation buttons remain local mock behavior for development
-only. The new API client is available for the next integration phase but is
-not exposed through the renderer bridge.
+The local mock activate/disable controls are hidden and inert unless
+`JDA_ENABLE_MOCK_DEVICE_FLOW=true` is set for local development.
 
 ## Setup-Code-First Rule
 
@@ -40,6 +39,11 @@ The setup code will be:
 - revocable before use
 - audited
 
+In the desktop Agent, the setup code is copied only into local submit scope,
+sent once through the main process, and then cleared from the renderer input.
+It is not logged, persisted, copied into pending state, or displayed after
+submission.
+
 ## Device Identity
 
 The scaffold creates an Ed25519 keypair through Node crypto. The private key is
@@ -53,6 +57,21 @@ Hardware fingerprint is advisory. It is not authentication.
 The API client maps the agent's local `publicKeyPem` value to the API's
 `publicKey` request field for setup-code claim. Private key material is never
 part of any device-side API DTO.
+
+After a successful claim, the Agent persists only safe pending activation
+metadata:
+
+- device id
+- server status
+- branch summary
+- allowed capabilities from the server
+- safe HID prefix
+- optional sanitized device label
+- claim timestamp
+
+The pending record must not contain setup codes, setup-code hashes, session
+tokens, token hashes, private keys, public keys, full hardware fingerprint
+hashes, or raw API bodies.
 
 ## Device API Client Rules
 
@@ -125,7 +144,10 @@ Renderer security defaults:
 - preload exposes a minimal bridge only
 - renderer never receives private key material
 
-The renderer can ask the main process for safe status and mock actions only.
+The renderer can ask the main process for safe status, submit a setup-code
+claim, and read placeholder hardware status. It does not receive private keys,
+public keys, session tokens, full hardware fingerprint hashes, storage paths,
+or a general API client.
 
 ## Future POS Enforcement Flow
 

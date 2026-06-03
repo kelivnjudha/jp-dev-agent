@@ -7,6 +7,9 @@ import type { PrinterStatus } from '@jade-dev-agent/printer-adapter';
 export interface AgentSnapshot {
   registration: DeviceRegistrationSnapshot;
   health: AgentHealth;
+  controls: {
+    mockFlowEnabled: boolean;
+  };
 }
 
 export interface HardwareStatus {
@@ -15,9 +18,12 @@ export interface HardwareStatus {
 }
 
 const api = {
-  getSnapshot: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:getSnapshot'),
-  submitSetupCode: (setupCode: string): Promise<AgentSnapshot> =>
-    ipcRenderer.invoke('agent:submitSetupCode', setupCode),
+  getAgentStatus: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:getSnapshot'),
+  claimSetupCode: (
+    setupCode: string,
+    deviceLabel?: string,
+  ): Promise<AgentSnapshot> =>
+    ipcRenderer.invoke('agent:claimSetupCode', setupCode, deviceLabel),
   mockActivate: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:mockActivate'),
   disable: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:disable'),
   getHardwareStatus: (): Promise<HardwareStatus> =>

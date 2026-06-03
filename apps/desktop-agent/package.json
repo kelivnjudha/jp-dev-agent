@@ -11,6 +11,7 @@
     "typecheck": "tsc -b tsconfig.json --pretty false"
   },
   "dependencies": {
+    "@jade-dev-agent/agent-api-client": "0.1.0",
     "@jade-dev-agent/agent-core": "0.1.0",
     "@jade-dev-agent/agent-proxy": "0.1.0",
     "@jade-dev-agent/device-identity": "0.1.0",

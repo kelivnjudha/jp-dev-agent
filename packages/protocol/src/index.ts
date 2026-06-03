@@ -179,6 +179,16 @@ export interface BranchDeviceHeartbeatResponse {
   session: BranchDeviceSessionSummary;
 }
 
+export interface PendingDeviceRegistrationState {
+  deviceId: string;
+  serverStatus: BranchDeviceStatusValue;
+  branch: BranchDeviceBranchSummary | null;
+  allowedCapabilities: DeviceCapability[];
+  safeHidPrefix: string;
+  deviceLabel?: string;
+  claimedAt: string;
+}
+
 export interface DeviceSession {
   deviceId: string;
   sessionId?: string;
@@ -208,8 +218,12 @@ export interface SafeDeviceIdentity {
 
 export interface DeviceRegistrationSnapshot {
   status: AgentRegistrationStatus;
-  setupCodeMasked?: string;
   deviceId?: string;
+  branch?: BranchDeviceBranchSummary | null;
+  safeHidPrefix?: string;
+  deviceLabel?: string;
+  claimedAt?: string;
+  serverStatus?: BranchDeviceStatusValue;
   capabilities: DeviceCapability[];
   mode: AgentMode;
   message: string;

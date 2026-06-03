@@ -8,6 +8,7 @@
   },
   "references": [
     { "path": "../../packages/protocol" },
+    { "path": "../../packages/agent-api-client" },
     { "path": "../../packages/agent-core" },
     { "path": "../../packages/agent-proxy" },
     { "path": "../../packages/device-identity" },

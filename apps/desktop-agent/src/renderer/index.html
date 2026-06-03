@@ -29,31 +29,62 @@
           <p class="section-label">Setup-code-first registration</p>
           <h2>Claim this device</h2>
           <p>
-            This scaffold never creates a registration request without a setup
-            code. The local claim below is mock-only until the API registry is
-            implemented.
+            Enter the one-time setup code generated in JP Admin. This device
+            will stay locked until Main Admin or an authorized Admin activates
+            it in Branch Devices.
           </p>
+          <label for="device-label">Device label <span class="optional">(optional)</span></label>
+          <input
+            id="device-label"
+            autocomplete="off"
+            maxlength="80"
+            placeholder="Front counter workstation"
+            spellcheck="false"
+          />
           <label for="setup-code">Setup code</label>
           <div class="input-row">
             <input
               id="setup-code"
               autocomplete="off"
-              placeholder="JPDA-XXXX-XXXX"
+              aria-describedby="setup-help"
+              placeholder="JPBD-XXXXXX-XXXXXX-XXXXXX"
               spellcheck="false"
             />
-            <button id="submit-code">Submit</button>
+            <button id="submit-code">Claim Device</button>
           </div>
-          <button id="mock-activate" class="secondary">Mock activate</button>
-          <button id="disable-device" class="danger">Disable locally</button>
+          <p id="setup-help" class="small">
+            The setup code is sent once to Jade Palace API and is not saved on this device.
+          </p>
+          <div id="dev-controls" class="dev-controls" hidden>
+            <button id="mock-activate" class="secondary">Mock activate</button>
+            <button id="disable-device" class="danger">Disable locally</button>
+          </div>
         </article>
 
         <article class="card">
-          <p class="section-label">Local Agent Proxy</p>
-          <h2>Proxy status</h2>
-          <p id="proxy-status">Checking local proxy...</p>
+          <p class="section-label">Pending activation</p>
+          <h2>Admin approval</h2>
+          <dl id="pending-details" class="detail-list">
+            <div>
+              <dt>Branch</dt>
+              <dd id="branch-detail">Not claimed yet.</dd>
+            </div>
+            <div>
+              <dt>Safe HID</dt>
+              <dd id="hid-detail">Unavailable</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd id="server-status-detail">Waiting for setup code</dd>
+            </div>
+            <div>
+              <dt>Claimed</dt>
+              <dd id="claimed-at-detail">Not yet</dd>
+            </div>
+          </dl>
           <p class="small">
-            The scaffold binds to 127.0.0.1 only and exposes health/status plus
-            one dev-only test endpoint. It does not forward arbitrary URLs.
+            Ask Main Admin or an authorized Admin to activate this device in
+            JP Admin -> Branch -> Devices.
           </p>
         </article>
 
@@ -70,18 +101,22 @@
         </article>
 
         <article class="card">
-          <p class="section-label">Hardware placeholders</p>
-          <h2>Adapter status</h2>
-          <p id="hardware-status">Hardware adapter status unavailable.</p>
+          <p class="section-label">Local Agent Proxy</p>
+          <h2>Proxy status</h2>
+          <p id="proxy-status">Checking local proxy...</p>
           <p class="small">
-            Printer and NFC integrations are interface-only in this phase.
+            The proxy binds to 127.0.0.1 only and does not forward POS or API
+            requests in this phase.
           </p>
+          <hr />
+          <h2>Hardware placeholders</h2>
+          <p id="hardware-status">Hardware adapter status unavailable.</p>
         </article>
       </section>
 
       <footer>
         <button id="refresh" class="ghost">Refresh status</button>
-        <span>API enforcement and real device approval come in later phases.</span>
+        <span>Session challenge, heartbeat, and activation polling come in later phases.</span>
       </footer>
     </main>
     <script type="module" src="./renderer.js"></script>
