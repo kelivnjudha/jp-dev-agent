@@ -32,6 +32,18 @@ export function isAllowedProxyPath(pathname: string): pathname is AllowedProxyPa
   return (ALLOWED_PROXY_PATHS as readonly string[]).includes(pathname);
 }
 
+export function resolveLocalProxyPath(rawUrl: string): string | null {
+  if (!rawUrl.startsWith('/') || rawUrl.startsWith('//')) return null;
+
+  try {
+    const url = new URL(rawUrl, `http://${DEFAULT_PROXY_HOST}`);
+    if (url.origin !== `http://${DEFAULT_PROXY_HOST}`) return null;
+    return url.pathname;
+  } catch {
+    return null;
+  }
+}
+
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -60,10 +72,22 @@ async function handleRequest(
   options: AgentProxyOptions,
 ): Promise<void> {
   const rawUrl = req.url || '/';
-  const url = new URL(rawUrl, `http://${DEFAULT_PROXY_HOST}`);
-  const path = url.pathname;
+  let path = '[invalid-local-proxy-path]';
   let statusCode = 404;
   try {
+    const resolvedPath = resolveLocalProxyPath(rawUrl);
+    if (!resolvedPath) {
+      statusCode = 404;
+      writeJson(res, statusCode, {
+        ok: false,
+        code: 'AGENT_PROXY_PATH_NOT_ALLOWED',
+        message: 'This local agent path is not available.',
+      });
+      return;
+    }
+
+    path = resolvedPath;
+
     if (!isAllowedProxyPath(path)) {
       statusCode = 404;
       writeJson(res, statusCode, {
