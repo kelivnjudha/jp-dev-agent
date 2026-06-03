@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jade Device Agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">JADE PALACE SECURE DEVICE</p>
+          <h1 id="screen-title">Loading Agent</h1>
+          <p id="message" class="message">Preparing local device agent.</p>
+        </div>
+        <div class="badge-stack">
+          <span id="status-badge" class="badge">LOADING</span>
+          <span id="mode-badge" class="badge muted">SETUP</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card setup-card">
+          <p class="section-label">Setup-code-first registration</p>
+          <h2>Claim this device</h2>
+          <p>
+            This scaffold never creates a registration request without a setup
+            code. The local claim below is mock-only until the API registry is
+            implemented.
+          </p>
+          <label for="setup-code">Setup code</label>
+          <div class="input-row">
+            <input
+              id="setup-code"
+              autocomplete="off"
+              placeholder="JPDA-XXXX-XXXX"
+              spellcheck="false"
+            />
+            <button id="submit-code">Submit</button>
+          </div>
+          <button id="mock-activate" class="secondary">Mock activate</button>
+          <button id="disable-device" class="danger">Disable locally</button>
+        </article>
+
+        <article class="card">
+          <p class="section-label">Local Agent Proxy</p>
+          <h2>Proxy status</h2>
+          <p id="proxy-status">Checking local proxy...</p>
+          <p class="small">
+            The scaffold binds to 127.0.0.1 only and exposes health/status plus
+            one dev-only test endpoint. It does not forward arbitrary URLs.
+          </p>
+        </article>
+
+        <article class="card">
+          <p class="section-label">Capabilities</p>
+          <h2>Device functions</h2>
+          <p id="capabilities">No active capabilities yet.</p>
+          <div class="cap-grid">
+            <span>POS mode</span>
+            <span>Checkpoint mode</span>
+            <span>Printer bridge</span>
+            <span>NFC reader</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <p class="section-label">Hardware placeholders</p>
+          <h2>Adapter status</h2>
+          <p id="hardware-status">Hardware adapter status unavailable.</p>
+          <p class="small">
+            Printer and NFC integrations are interface-only in this phase.
+          </p>
+        </article>
+      </section>
+
+      <footer>
+        <button id="refresh" class="ghost">Refresh status</button>
+        <span>API enforcement and real device approval come in later phases.</span>
+      </footer>
+    </main>
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

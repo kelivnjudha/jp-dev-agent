@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "baseUrl": ".",
+    "paths": {
+      "@jade-dev-agent/protocol": ["packages/protocol/src/index.ts"],
+      "@jade-dev-agent/agent-core": ["packages/agent-core/src/index.ts"],
+      "@jade-dev-agent/agent-proxy": ["packages/agent-proxy/src/index.ts"],
+      "@jade-dev-agent/device-identity": ["packages/device-identity/src/index.ts"],
+      "@jade-dev-agent/device-storage": ["packages/device-storage/src/index.ts"],
+      "@jade-dev-agent/printer-adapter": ["packages/hardware-adapters/printer/src/index.ts"],
+      "@jade-dev-agent/nfc-adapter": ["packages/hardware-adapters/nfc/src/index.ts"]
+    }
+  }
+}

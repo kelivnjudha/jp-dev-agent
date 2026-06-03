@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "types": ["node", "electron"]
+  },
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/agent-core" },
+    { "path": "../../packages/agent-proxy" },
+    { "path": "../../packages/device-identity" },
+    { "path": "../../packages/device-storage" },
+    { "path": "../../packages/hardware-adapters/printer" },
+    { "path": "../../packages/hardware-adapters/nfc" }
+  ],
+  "include": ["src/**/*.ts"]
+}

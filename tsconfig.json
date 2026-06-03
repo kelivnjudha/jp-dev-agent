@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/device-storage" },
+    { "path": "./packages/device-identity" },
+    { "path": "./packages/agent-core" },
+    { "path": "./packages/agent-proxy" },
+    { "path": "./packages/hardware-adapters/printer" },
+    { "path": "./packages/hardware-adapters/nfc" },
+    { "path": "./apps/desktop-agent" }
+  ]
+}

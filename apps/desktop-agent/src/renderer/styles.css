@@ -1,0 +1,206 @@
+:root {
+  color-scheme: dark;
+  --bg: #061b16;
+  --bg2: #0b2a22;
+  --glass: rgba(255, 255, 255, 0.08);
+  --glass-strong: rgba(255, 255, 255, 0.14);
+  --border: rgba(237, 213, 139, 0.22);
+  --gold: #e4c46d;
+  --text: #f8fbf7;
+  --muted: rgba(248, 251, 247, 0.68);
+  --danger: #ff8a7a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family:
+    Avenir Next,
+    Trebuchet MS,
+    Segoe UI,
+    sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 10% 10%, rgba(228, 196, 109, 0.18), transparent 30%),
+    radial-gradient(circle at 90% 0%, rgba(68, 157, 121, 0.28), transparent 35%),
+    linear-gradient(135deg, var(--bg), var(--bg2));
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-height: 100vh;
+  padding: 36px;
+}
+
+.hero,
+.card,
+footer {
+  border: 1px solid var(--border);
+  background: var(--glass);
+  box-shadow: 0 22px 80px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 32px;
+  padding: 30px;
+}
+
+.eyebrow,
+.section-label {
+  margin: 0 0 8px;
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 12px;
+  font-size: clamp(38px, 6vw, 68px);
+  line-height: 0.95;
+}
+
+h2 {
+  margin-bottom: 10px;
+  font-size: 24px;
+}
+
+.message,
+.card p,
+footer {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.badge-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.badge {
+  min-width: 180px;
+  border: 1px solid rgba(228, 196, 109, 0.45);
+  border-radius: 999px;
+  padding: 11px 16px;
+  color: var(--gold);
+  background: rgba(228, 196, 109, 0.1);
+  text-align: center;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.badge.muted {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.card {
+  min-height: 245px;
+  border-radius: 28px;
+  padding: 26px;
+}
+
+label {
+  display: block;
+  margin: 18px 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+}
+
+input {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  padding: 0 14px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.22);
+  font: inherit;
+}
+
+button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 16px;
+  padding: 0 18px;
+  color: #08211b;
+  background: var(--gold);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.secondary,
+.danger,
+.ghost {
+  margin-top: 14px;
+  color: var(--text);
+  background: var(--glass-strong);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.cap-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.cap-grid span {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.small {
+  font-size: 13px;
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  border-radius: 24px;
+  padding: 18px 22px;
+}

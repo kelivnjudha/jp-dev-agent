@@ -1,0 +1,22 @@
+{
+  "name": "@jade-dev-agent/desktop-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main/main.js",
+  "scripts": {
+    "dev": "npm run build && electron ./dist/main/main.js",
+    "build": "tsc -b tsconfig.json && npm run build:renderer",
+    "build:renderer": "node scripts/copy-renderer.mjs",
+    "typecheck": "tsc -b tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@jade-dev-agent/agent-core": "0.1.0",
+    "@jade-dev-agent/agent-proxy": "0.1.0",
+    "@jade-dev-agent/device-identity": "0.1.0",
+    "@jade-dev-agent/device-storage": "0.1.0",
+    "@jade-dev-agent/nfc-adapter": "0.1.0",
+    "@jade-dev-agent/printer-adapter": "0.1.0",
+    "@jade-dev-agent/protocol": "0.1.0"
+  }
+}

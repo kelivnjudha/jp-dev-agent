@@ -1,0 +1,28 @@
+{
+  "name": "jp-dev-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jade Palace secure branch device agent scaffold.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "packages/hardware-adapters/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @jade-dev-agent/desktop-agent",
+    "build": "tsc -b tsconfig.json && npm run build:renderer --workspace @jade-dev-agent/desktop-agent",
+    "typecheck": "tsc -b tsconfig.json --pretty false",
+    "lint": "node scripts/lint-security.mjs",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "secrets:scan": "node scripts/scan-secrets.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "electron": "^42.3.2",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
