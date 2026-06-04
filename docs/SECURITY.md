@@ -7,11 +7,13 @@ requests that do not include valid approved device proof.
 
 ## Current Phase
 
-JPDEVAGENT-R3-B-D-C wires the desktop Agent setup-code form to the real Branch
-Device Registry claim endpoint and shows a safe pending-activation state.
+JPDEVAGENT-R3-B-D-D-B adds a manual Check Activation action on top of the real
+setup-code claim flow. The action asks the API for a device session challenge,
+rebuilds the canonical payload locally, signs it with the local Ed25519 private
+key, and requests a short-lived device session.
 
 - No automatic pending activation polling.
-- No active device session challenge/sign/issue loop.
+- No automatic active device session challenge/sign/issue loop.
 - No device session heartbeat loop.
 - No POS forwarding.
 - No printer bridge implementation.
@@ -95,8 +97,17 @@ The client:
   fingerprint hashes, session tokens, or Authorization header values
 
 The raw device session token is returned only from the session issue function.
-It must be treated as memory-only sensitive data by later phases and must never
-be exposed to the Electron renderer.
+In this phase the main process stores the token in memory only. It is cleared
+before setup-code claim, before manual activation retries, after activation
+failures, on local mock disable/activation transitions, and on app quit. It is
+never persisted, logged, sent through preload, rendered, or exposed by the local
+proxy.
+
+The manual activation check fails closed when the API challenge is malformed,
+expired or near expiry, or when the server `signingPayload` does not exactly
+match:
+
+`JP_BRANCH_DEVICE_SESSION_V1\n{deviceId}\n{challenge}\n{timestamp}`
 
 ## Local Proxy Rules
 
@@ -145,9 +156,10 @@ Renderer security defaults:
 - renderer never receives private key material
 
 The renderer can ask the main process for safe status, submit a setup-code
-claim, and read placeholder hardware status. It does not receive private keys,
-public keys, session tokens, full hardware fingerprint hashes, storage paths,
-or a general API client.
+claim, manually check activation, and read placeholder hardware status. It does
+not receive private keys, public keys, challenges, signatures, signing payloads,
+session tokens, full hardware fingerprint hashes, storage paths, or a general
+API client.
 
 ## Future POS Enforcement Flow
 

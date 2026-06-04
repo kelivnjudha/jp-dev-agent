@@ -44,9 +44,14 @@ export const BRANCH_DEVICE_API_ERROR_CODES = [
   'DEVICE_DISABLED',
   'DEVICE_DENIED',
   'DEVICE_REVOKED',
+  'SESSION_CHALLENGE_INVALID',
+  'SESSION_SIGNATURE_INVALID',
   'SESSION_CHALLENGE_FAILED',
   'SESSION_ISSUE_FAILED',
   'HEARTBEAT_FAILED',
+  'SESSION_TOKEN_MISSING',
+  'SESSION_TOKEN_INVALID',
+  'SESSION_EXPIRED',
   'UNAUTHORIZED',
   'FORBIDDEN',
   'RATE_LIMITED',
@@ -107,9 +112,14 @@ const API_ERROR_MESSAGES: Record<BranchDeviceApiErrorCode, string> = {
   DEVICE_DISABLED: 'Device is disabled.',
   DEVICE_DENIED: 'Device was denied.',
   DEVICE_REVOKED: 'Device was revoked.',
+  SESSION_CHALLENGE_INVALID: 'Device session challenge is invalid.',
+  SESSION_SIGNATURE_INVALID: 'Device session signature is invalid.',
   SESSION_CHALLENGE_FAILED: 'Device session challenge failed.',
   SESSION_ISSUE_FAILED: 'Device session issue failed.',
   HEARTBEAT_FAILED: 'Device heartbeat failed.',
+  SESSION_TOKEN_MISSING: 'Device session token is missing.',
+  SESSION_TOKEN_INVALID: 'Device session token is invalid.',
+  SESSION_EXPIRED: 'Device session expired.',
   UNAUTHORIZED: 'Device API request is unauthorized.',
   FORBIDDEN: 'Device API request is forbidden.',
   RATE_LIMITED: 'Device API request was rate limited.',
@@ -390,11 +400,11 @@ function mapHttpFailure({
   apiCode?: string;
 }): BranchDeviceApiErrorCode {
   if (httpStatus === 429) return 'RATE_LIMITED';
-  if (httpStatus === 401) return 'UNAUTHORIZED';
   if (apiCode) {
     const mapped = mapApiCode(apiCode);
     if (mapped) return mapped;
   }
+  if (httpStatus === 401) return 'UNAUTHORIZED';
   if (httpStatus === 403) return 'FORBIDDEN';
   if (endpoint === 'claim') return 'SETUP_CODE_INVALID';
   if (endpoint === 'sessionChallenge') return 'SESSION_CHALLENGE_FAILED';
@@ -415,13 +425,22 @@ function mapApiCode(apiCode: string): BranchDeviceApiErrorCode | null {
       return 'DEVICE_NOT_ACTIVE';
     case 'BRANCH_DEVICE_NOT_DISABLED':
       return 'DEVICE_DISABLED';
+    case 'BRANCH_DEVICE_DISABLED':
+      return 'DEVICE_DISABLED';
+    case 'BRANCH_DEVICE_DENIED':
+      return 'DEVICE_DENIED';
+    case 'BRANCH_DEVICE_REVOKED':
+      return 'DEVICE_REVOKED';
     case 'BRANCH_DEVICE_SESSION_CHALLENGE_INVALID':
-      return 'SESSION_CHALLENGE_FAILED';
+      return 'SESSION_CHALLENGE_INVALID';
     case 'BRANCH_DEVICE_SESSION_SIGNATURE_INVALID':
-      return 'SESSION_ISSUE_FAILED';
+      return 'SESSION_SIGNATURE_INVALID';
     case 'BRANCH_DEVICE_SESSION_TOKEN_MISSING':
+      return 'SESSION_TOKEN_MISSING';
     case 'BRANCH_DEVICE_SESSION_TOKEN_INVALID':
+      return 'SESSION_TOKEN_INVALID';
     case 'BRANCH_DEVICE_SESSION_EXPIRED':
+      return 'SESSION_EXPIRED';
     case 'UNAUTHORIZED':
       return 'UNAUTHORIZED';
     case 'BRANCH_DEVICE_ACTOR_FORBIDDEN':

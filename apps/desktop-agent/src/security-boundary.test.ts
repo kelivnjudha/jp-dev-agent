@@ -22,6 +22,7 @@ test('preload exposes only safe setup and status bridge functions', async () => 
 
   assert.match(preload, /getAgentStatus/);
   assert.match(preload, /claimSetupCode/);
+  assert.match(preload, /checkActivation/);
   assert.doesNotMatch(preload, /submitSetupCode/);
   assert.doesNotMatch(preload, /privateKeyPem/);
   assert.doesNotMatch(preload, /publicKeyPem/);
@@ -38,6 +39,8 @@ test('renderer never reads raw device identifiers or secret identity fields', as
   assert.doesNotMatch(renderer, /publicKeyPem/);
   assert.doesNotMatch(renderer, /hardwareFingerprintHash/);
   assert.doesNotMatch(renderer, /sessionToken/);
+  assert.doesNotMatch(renderer, /signingPayload/);
+  assert.doesNotMatch(renderer, /signature/);
 });
 
 test('mock activation controls are hidden by default and gated in main process', async () => {
@@ -67,4 +70,34 @@ test('real setup-code claim is main-process only', async () => {
   assert.match(main, /claimBranchDeviceSetupCode/);
   assert.doesNotMatch(preload, /claimBranchDeviceSetupCode/);
   assert.doesNotMatch(renderer, /claimBranchDeviceSetupCode/);
+});
+
+test('session challenge, signing, and token handling stay main-process only', async () => {
+  const [main, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  assert.match(main, /requestBranchDeviceSessionChallenge/);
+  assert.match(main, /issueBranchDeviceSession/);
+  assert.match(main, /signDeviceSessionPayload/);
+  assert.match(main, /let deviceSessionToken: string \| null = null/);
+  assert.doesNotMatch(preload, /requestBranchDeviceSessionChallenge/);
+  assert.doesNotMatch(preload, /issueBranchDeviceSession/);
+  assert.doesNotMatch(preload, /signDeviceSessionPayload/);
+  assert.doesNotMatch(preload, /privateKeyPem/);
+  assert.doesNotMatch(preload, /sessionToken/);
+  assert.doesNotMatch(renderer, /requestBranchDeviceSessionChallenge/);
+  assert.doesNotMatch(renderer, /issueBranchDeviceSession/);
+  assert.doesNotMatch(renderer, /signDeviceSessionPayload/);
+  assert.doesNotMatch(renderer, /sessionToken/);
+});
+
+test('local proxy remains non-forwarding during manual activation phase', async () => {
+  const proxy = await readSource('packages/agent-proxy/src/index.ts');
+
+  assert.doesNotMatch(proxy, /fetch\(/);
+  assert.doesNotMatch(proxy, /sessionToken/);
+  assert.match(proxy, /DEV_ONLY_NO_UPSTREAM_FORWARDING/);
 });

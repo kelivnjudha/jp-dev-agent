@@ -5,13 +5,18 @@ import {
   createInitialAgentStateFromPending,
   createPendingActivationState,
   createInitialAgentState,
+  completeActivationCheck,
   disableDevice,
+  failActivationCheck,
   failSetupCodeClaim,
   maskSetupCode,
   mockActivateDevice,
   mockSubmitSetupCodeForPendingActivation,
+  safeActivationCheckErrorMessage,
   safeSetupCodeClaimErrorMessage,
+  startActivationCheck,
   startSetupCodeClaim,
+  toRegistrationSnapshot,
 } from './index.js';
 
 test('maskSetupCode keeps only a safe prefix', () => {
@@ -58,6 +63,77 @@ test('initial state restores safe pending activation when present', () => {
   );
   assert.equal(restored.status, 'PENDING_ACTIVATION');
   assert.deepEqual(restored.capabilities, ['SHOP_CHECKPOINT']);
+});
+
+test('activation check transitions through connecting without secrets', () => {
+  const pending = createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: null,
+    allowedCapabilities: ['POS_TERMINAL'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  });
+  const connecting = startActivationCheck(pending);
+  assert.equal(connecting.status, 'ACTIVE_SESSION_CONNECTING');
+  assert.equal(connecting.connectionStatus, 'CHECKING_ACTIVATION');
+  assert.equal(JSON.stringify(connecting).includes('sessionToken'), false);
+});
+
+test('successful activation check stores safe session metadata only', () => {
+  const pending = createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: { id: 'b0000000-0000-4000-8000-000000000001', code: 'BKK', name: 'Bangkok' },
+    allowedCapabilities: ['POS_TERMINAL', 'BARCODE_SCANNER'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  });
+  const active = completeActivationCheck(startActivationCheck(pending), {
+    status: 'ACTIVE',
+    expiresAt: '2026-06-04T13:00:00.000Z',
+  });
+  const snapshot = toRegistrationSnapshot(active);
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.equal(snapshot.connectionStatus, 'CONNECTED');
+  assert.equal(snapshot.sessionStatus, 'ACTIVE');
+  assert.equal(snapshot.sessionExpiresAt, '2026-06-04T13:00:00.000Z');
+  assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
+  assert.equal(JSON.stringify(snapshot).includes('privateKeyPem'), false);
+  assert.equal(JSON.stringify(snapshot).includes('publicKeyPem'), false);
+});
+
+test('not-active activation check returns pending state', () => {
+  const pending = startActivationCheck(createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: null,
+    allowedCapabilities: ['POS_TERMINAL'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  }));
+  const next = failActivationCheck(pending, 'DEVICE_NOT_ACTIVE');
+  assert.equal(next.status, 'PENDING_ACTIVATION');
+  assert.equal(next.connectionStatus, 'DISCONNECTED');
+  assert.equal(next.message, 'Device is still waiting for admin activation.');
+});
+
+test('security activation failures fail closed', () => {
+  const pending = startActivationCheck(createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: null,
+    allowedCapabilities: ['POS_TERMINAL'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  }));
+  const failed = failActivationCheck(pending, 'SIGNING_PAYLOAD_MISMATCH');
+  assert.equal(failed.status, 'ERROR');
+  assert.equal(failed.connectionStatus, 'LOCKED');
+  assert.equal(
+    safeActivationCheckErrorMessage('SESSION_SIGNATURE_INVALID'),
+    'Secure device session could not be verified.',
+  );
 });
 
 test('safe claim errors never include raw setup code or API bodies', () => {

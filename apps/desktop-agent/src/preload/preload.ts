@@ -24,6 +24,8 @@ const api = {
     deviceLabel?: string,
   ): Promise<AgentSnapshot> =>
     ipcRenderer.invoke('agent:claimSetupCode', setupCode, deviceLabel),
+  checkActivation: (): Promise<AgentSnapshot> =>
+    ipcRenderer.invoke('agent:checkActivation'),
   mockActivate: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:mockActivate'),
   disable: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:disable'),
   getHardwareStatus: (): Promise<HardwareStatus> =>

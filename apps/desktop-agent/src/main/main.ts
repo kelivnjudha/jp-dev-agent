@@ -6,16 +6,22 @@ import { fileURLToPath } from 'node:url';
 import {
   BranchDeviceApiError,
   claimBranchDeviceSetupCode,
+  issueBranchDeviceSession,
+  requestBranchDeviceSessionChallenge,
 } from '@jade-dev-agent/agent-api-client';
 import {
+  completeActivationCheck,
   createInitialAgentState,
   createInitialAgentStateFromPending,
   createPendingActivationState,
   disableDevice,
+  failActivationCheck,
   failSetupCodeClaim,
   mockActivateDevice,
+  startActivationCheck,
   startSetupCodeClaim,
   toRegistrationSnapshot,
+  type ActivationCheckErrorCode,
   type AgentState,
   type SetupCodeClaimErrorCode,
 } from '@jade-dev-agent/agent-core';
@@ -28,6 +34,7 @@ import {
   computeHardwareFingerprintHash,
   createSafeDeviceIdentity,
   createSafeHidPrefix,
+  signDeviceSessionPayload,
 } from '@jade-dev-agent/device-identity';
 import {
   DevFileDeviceStorage,
@@ -42,6 +49,10 @@ import type {
   PendingDeviceRegistrationState,
   SafeDeviceIdentity,
 } from '@jade-dev-agent/protocol';
+import {
+  BranchDeviceSessionChallengeValidationError,
+  validateBranchDeviceSessionChallengeSigningPayload,
+} from '@jade-dev-agent/protocol';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -52,11 +63,11 @@ const DEFAULT_MOCK_CAPABILITIES: DeviceCapability[] = [
   'POS_TERMINAL',
   'BARCODE_SCANNER',
 ];
-
 let mainWindow: BrowserWindow | null = null;
 let state: AgentState = createInitialAgentState(false);
 let proxy: RunningAgentProxy | null = null;
 let storage: DeviceStorage | null = null;
+let deviceSessionToken: string | null = null;
 
 const printerAdapter = new PlaceholderPrinterAdapter();
 const nfcAdapter = new PlaceholderNfcReaderAdapter();
@@ -92,6 +103,10 @@ function getSnapshot() {
       mockFlowEnabled: MOCK_FLOW_ENABLED,
     },
   };
+}
+
+function clearDeviceSessionToken(): void {
+  deviceSessionToken = null;
 }
 
 async function ensureLocalIdentity(): Promise<SafeDeviceIdentity> {
@@ -181,6 +196,44 @@ function mapClaimFailure(error: unknown): SetupCodeClaimErrorCode {
   return 'UNKNOWN';
 }
 
+function mapActivationFailure(error: unknown): ActivationCheckErrorCode {
+  if (error instanceof BranchDeviceSessionChallengeValidationError) {
+    return error.code;
+  }
+  if (error instanceof BranchDeviceApiError) {
+    switch (error.code) {
+      case 'DEVICE_NOT_ACTIVE':
+      case 'DEVICE_DISABLED':
+      case 'DEVICE_DENIED':
+      case 'DEVICE_REVOKED':
+      case 'SESSION_CHALLENGE_INVALID':
+      case 'SESSION_SIGNATURE_INVALID':
+      case 'API_UNAVAILABLE':
+      case 'MALFORMED_RESPONSE':
+        return error.code;
+      default:
+        return 'UNKNOWN';
+    }
+  }
+  return 'UNKNOWN';
+}
+
+function pendingDeviceFromState(): PendingDeviceRegistrationState | null {
+  if (!state.deviceId || !state.safeHidPrefix || !state.claimedAt) return null;
+  const pendingDevice: PendingDeviceRegistrationState = {
+    deviceId: state.deviceId,
+    serverStatus: state.serverStatus ?? 'PENDING_ACTIVATION',
+    branch: state.branch ?? null,
+    allowedCapabilities: [...state.capabilities],
+    safeHidPrefix: state.safeHidPrefix,
+    claimedAt: state.claimedAt,
+  };
+  if (state.deviceLabel !== undefined) {
+    pendingDevice.deviceLabel = state.deviceLabel;
+  }
+  return pendingDevice;
+}
+
 function createResetRequiredState(message: string): AgentState {
   return {
     status: 'RESET_REQUIRED',
@@ -241,6 +294,7 @@ async function bootstrap(): Promise<void> {
 ipcMain.handle('agent:getSnapshot', () => getSnapshot());
 
 ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, deviceLabel: unknown) => {
+  clearDeviceSessionToken();
   const rawSetupCode = typeof setupCode === 'string' ? setupCode.trim() : '';
   if (!rawSetupCode) {
     state = failSetupCodeClaim(state, 'SETUP_CODE_REQUIRED');
@@ -293,14 +347,81 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
   return getSnapshot();
 });
 
+ipcMain.handle('agent:checkActivation', async () => {
+  if (state.status === 'ACTIVE' && deviceSessionToken) {
+    return getSnapshot();
+  }
+
+  const apiBaseUrl = resolveApiBaseUrl();
+  if (!apiBaseUrl) {
+    clearDeviceSessionToken();
+    state = failActivationCheck(state, 'CONFIG_INVALID');
+    return getSnapshot();
+  }
+
+  const pendingDevice = (await storage?.readPendingDevice()) ?? pendingDeviceFromState();
+  if (!pendingDevice) {
+    clearDeviceSessionToken();
+    state = failActivationCheck(state, 'UNKNOWN');
+    return getSnapshot();
+  }
+
+  const identity = await storage?.readIdentity();
+  if (!identity) {
+    clearDeviceSessionToken();
+    state = failActivationCheck(
+      createPendingActivationState(pendingDevice),
+      'LOCAL_IDENTITY_MISSING',
+    );
+    return getSnapshot();
+  }
+
+  clearDeviceSessionToken();
+  state = startActivationCheck(createPendingActivationState(pendingDevice));
+
+  try {
+    const config = {
+      apiBaseUrl,
+      appVersion: APP_VERSION,
+    };
+    const challenge = await requestBranchDeviceSessionChallenge(
+      config,
+      pendingDevice.deviceId,
+    );
+    const signingPayload = validateBranchDeviceSessionChallengeSigningPayload({
+      deviceId: pendingDevice.deviceId,
+      challenge,
+    });
+    const signature = signDeviceSessionPayload({
+      privateKeyPem: identity.privateKeyPem,
+      payload: signingPayload,
+    });
+    const sessionIssue = await issueBranchDeviceSession(config, {
+      deviceId: pendingDevice.deviceId,
+      challenge: challenge.challenge,
+      signature,
+      timestamp: challenge.timestamp,
+    });
+    deviceSessionToken = sessionIssue.sessionToken;
+    state = completeActivationCheck(state, sessionIssue.session);
+  } catch (error) {
+    clearDeviceSessionToken();
+    state = failActivationCheck(state, mapActivationFailure(error));
+  }
+
+  return getSnapshot();
+});
+
 ipcMain.handle('agent:mockActivate', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
+  clearDeviceSessionToken();
   state = mockActivateDevice(state, DEFAULT_MOCK_CAPABILITIES);
   return getSnapshot();
 });
 
 ipcMain.handle('agent:disable', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
+  clearDeviceSessionToken();
   state = disableDevice(state, 'DEV ONLY: device disabled locally.');
   return getSnapshot();
 });
@@ -327,6 +448,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', (event) => {
+  clearDeviceSessionToken();
   if (!proxy) return;
   event.preventDefault();
   const currentProxy = proxy;

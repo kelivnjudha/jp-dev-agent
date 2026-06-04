@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { hostname, platform, release } from 'node:os';
 
 import type { SafeDeviceIdentity } from '@jade-dev-agent/protocol';
@@ -52,4 +52,14 @@ export function createSafeDeviceIdentity(seed = randomBytes(16).toString('hex'))
     },
     privateKeyPem: keyPair.privateKeyPem,
   };
+}
+
+export function signDeviceSessionPayload({
+  privateKeyPem,
+  payload,
+}: {
+  privateKeyPem: string;
+  payload: string;
+}): string {
+  return sign(null, Buffer.from(payload, 'utf8'), privateKeyPem).toString('base64url');
 }

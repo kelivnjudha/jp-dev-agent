@@ -187,9 +187,14 @@ button:disabled {
   display: none;
 }
 
-.dev-controls {
+.dev-controls,
+.activation-actions {
   display: flex;
   gap: 10px;
+}
+
+.activation-actions {
+  margin-top: 14px;
 }
 
 .cap-grid {
@@ -214,6 +219,10 @@ button:disabled {
   display: grid;
   gap: 12px;
   margin: 18px 0;
+}
+
+.detail-list.compact {
+  margin-bottom: 0;
 }
 
 .detail-list div {

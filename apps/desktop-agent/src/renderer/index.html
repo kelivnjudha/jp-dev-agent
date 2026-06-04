@@ -86,6 +86,28 @@
             Ask Main Admin or an authorized Admin to activate this device in
             JP Admin -> Branch -> Devices.
           </p>
+          <div class="activation-actions">
+            <button id="check-activation" class="secondary" hidden>Check Activation</button>
+          </div>
+          <p class="small">
+            After admin activation, use Check Activation to request a signed
+            device session. This version does not poll automatically.
+          </p>
+          <hr />
+          <dl class="detail-list compact">
+            <div>
+              <dt>Session</dt>
+              <dd id="session-status-detail">Not connected</dd>
+            </div>
+            <div>
+              <dt>Expires</dt>
+              <dd id="session-expires-detail">Not yet</dd>
+            </div>
+            <div>
+              <dt>Last check</dt>
+              <dd id="activation-checked-detail">Not yet</dd>
+            </div>
+          </dl>
         </article>
 
         <article class="card">
@@ -116,7 +138,7 @@
 
       <footer>
         <button id="refresh" class="ghost">Refresh status</button>
-        <span>Session challenge, heartbeat, and activation polling come in later phases.</span>
+        <span>Session heartbeat, automatic refresh, and activation polling come in later phases.</span>
       </footer>
     </main>
     <script type="module" src="./renderer.js"></script>

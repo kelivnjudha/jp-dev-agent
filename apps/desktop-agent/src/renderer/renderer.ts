@@ -11,6 +11,7 @@ interface ViewModel {
 const setupInput = document.querySelector<HTMLInputElement>('#setup-code');
 const deviceLabelInput = document.querySelector<HTMLInputElement>('#device-label');
 const submitButton = document.querySelector<HTMLButtonElement>('#submit-code');
+const checkActivationButton = document.querySelector<HTMLButtonElement>('#check-activation');
 const activateButton = document.querySelector<HTMLButtonElement>('#mock-activate');
 const disableButton = document.querySelector<HTMLButtonElement>('#disable-device');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh');
@@ -26,6 +27,9 @@ const branchDetail = document.querySelector<HTMLElement>('#branch-detail');
 const hidDetail = document.querySelector<HTMLElement>('#hid-detail');
 const serverStatusDetail = document.querySelector<HTMLElement>('#server-status-detail');
 const claimedAtDetail = document.querySelector<HTMLElement>('#claimed-at-detail');
+const sessionStatusDetail = document.querySelector<HTMLElement>('#session-status-detail');
+const sessionExpiresDetail = document.querySelector<HTMLElement>('#session-expires-detail');
+const activationCheckedDetail = document.querySelector<HTMLElement>('#activation-checked-detail');
 
 function setText(element: Element | null, value: string): void {
   if (element) element.textContent = value;
@@ -45,6 +49,12 @@ function render(next: ViewModel): void {
     (registration.serverStatus ?? registration.status).replaceAll('_', ' '),
   );
   setText(claimedAtDetail, formatDateTime(registration.claimedAt));
+  setText(
+    sessionStatusDetail,
+    formatConnectionStatus(registration.connectionStatus, registration.sessionStatus),
+  );
+  setText(sessionExpiresDetail, formatDateTime(registration.sessionExpiresAt ?? undefined));
+  setText(activationCheckedDetail, formatDateTime(registration.lastActivationCheckAt));
   setText(
     capabilityList,
     registration.capabilities.length
@@ -68,7 +78,7 @@ function render(next: ViewModel): void {
     devControls.hidden = !next.controls.mockFlowEnabled;
   }
   if (submitButton) {
-    submitButton.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE', 'RESET_REQUIRED'].includes(
+    submitButton.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
       registration.status,
     );
     submitButton.textContent = registration.status === 'SETUP_CODE_SUBMITTING'
@@ -76,15 +86,23 @@ function render(next: ViewModel): void {
       : 'Claim Device';
   }
   if (setupInput) {
-    setupInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE', 'RESET_REQUIRED'].includes(
+    setupInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
       registration.status,
     );
   }
   if (deviceLabelInput) {
-    deviceLabelInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE', 'RESET_REQUIRED'].includes(
+    deviceLabelInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
       registration.status,
     );
     if (registration.deviceLabel) deviceLabelInput.value = registration.deviceLabel;
+  }
+  if (checkActivationButton) {
+    const checking = registration.status === 'ACTIVE_SESSION_CONNECTING';
+    checkActivationButton.hidden = !['PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING'].includes(
+      registration.status,
+    );
+    checkActivationButton.disabled = checking;
+    checkActivationButton.textContent = checking ? 'Checking...' : 'Check Activation';
   }
   if (activateButton) {
     activateButton.disabled = !next.controls.mockFlowEnabled || registration.status !== 'PENDING_ACTIVATION';
@@ -136,6 +154,15 @@ function formatDateTime(value: string | undefined): string {
   return date.toLocaleString();
 }
 
+function formatConnectionStatus(
+  connectionStatus: DeviceRegistrationSnapshot['connectionStatus'],
+  sessionStatus: string | undefined,
+): string {
+  if (sessionStatus) return sessionStatus.replaceAll('_', ' ');
+  if (!connectionStatus) return 'Not connected';
+  return connectionStatus.replaceAll('_', ' ');
+}
+
 async function refresh(): Promise<void> {
   const [snapshot, hardware] = await Promise.all([
     window.jadeAgent.getAgentStatus(),
@@ -164,6 +191,26 @@ submitButton?.addEventListener('click', () => {
         submitButton.textContent = 'Claim Device';
       }
       setText(message, 'Device claim failed. Try again or ask an admin for a new setup code.');
+    });
+});
+
+checkActivationButton?.addEventListener('click', () => {
+  if (checkActivationButton) {
+    checkActivationButton.disabled = true;
+    checkActivationButton.textContent = 'Checking...';
+  }
+  void window.jadeAgent
+    .checkActivation()
+    .then(async (snapshot) => {
+      const hardware = await window.jadeAgent.getHardwareStatus();
+      render({ ...snapshot, hardware });
+    })
+    .catch(() => {
+      if (checkActivationButton) {
+        checkActivationButton.disabled = false;
+        checkActivationButton.textContent = 'Check Activation';
+      }
+      setText(message, 'Activation check failed. Device remains locked.');
     });
 });
 

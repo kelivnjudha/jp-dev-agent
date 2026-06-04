@@ -18,13 +18,15 @@ hardware.
 10. Active devices can obtain short-lived device sessions.
 
 R3-B-D-C implements steps 4 through 7 in the desktop Agent with the real
-setup-code claim API. Steps 8 through 10 remain deferred: there is no pending
-activation polling, challenge/sign/session loop, or heartbeat loop in this
-phase.
+setup-code claim API. R3-B-D-D-B adds a manual Check Activation action for step
+10 after an admin activates the pending device. Pending activation polling,
+automatic session refresh, and heartbeat remain deferred.
 
 After claim succeeds, the Agent displays Waiting for Admin Activation and tells
 operators to ask Main Admin or an authorized Admin to activate the device in
-JP Admin -> Branch -> Devices.
+JP Admin -> Branch -> Devices. After admin activation, the operator presses
+Check Activation to request a challenge, sign the canonical payload locally, and
+receive a short-lived device session.
 
 The setup code is never persisted after submission. The pending activation file
 stores only device id, server status, branch summary, server-granted
@@ -115,7 +117,9 @@ Session issue:
 - Response: `session`, `sessionToken`
 
 The raw `sessionToken` is sensitive and returned once. Later phases must keep
-it out of renderer state, logs, persisted storage, and error objects.
+it out of renderer state, logs, persisted storage, and error objects. In this
+phase the main process keeps the token in memory only and clears it on retry,
+failure, local mock state changes, and app quit.
 
 Heartbeat:
 
@@ -149,7 +153,7 @@ Attendance checkpoint APIs should require:
 This phase intentionally defers:
 
 - pending activation status polling
-- active device session challenge/sign/issue flow
+- automatic active device session challenge/sign/issue refresh
 - session heartbeat loop
 - JPPOS proxy integration
 - POS API enforcement

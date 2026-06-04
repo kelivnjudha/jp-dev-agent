@@ -325,7 +325,7 @@ test('API error mapping is safe and does not serialize secret response fragments
       },
     ),
     (error) => {
-      assertApiError(error, 'SESSION_ISSUE_FAILED');
+      assertApiError(error, 'SESSION_SIGNATURE_INVALID');
       assert.equal(String(error).includes(SESSION_TOKEN), false);
       assert.equal(JSON.stringify(error).includes(SESSION_TOKEN), false);
       assert.equal(JSON.stringify(error).includes(SIGNATURE), false);
@@ -355,6 +355,38 @@ test('unsafe API error code strings are not copied into logs or thrown errors', 
     },
   );
   assert.equal(JSON.stringify(events).includes(SESSION_TOKEN), false);
+});
+
+test('session challenge and token API errors map to explicit safe codes', async () => {
+  await assert.rejects(
+    requestBranchDeviceSessionChallenge(
+      baseConfig(createFetchMock(409, {
+        code: 'BRANCH_DEVICE_NOT_ACTIVE',
+      })),
+      'd0000000-0000-4000-8000-000000000001',
+    ),
+    (error) => assertApiError(error, 'DEVICE_NOT_ACTIVE'),
+  );
+
+  await assert.rejects(
+    requestBranchDeviceSessionChallenge(
+      baseConfig(createFetchMock(403, {
+        code: 'BRANCH_DEVICE_DISABLED',
+      })),
+      'd0000000-0000-4000-8000-000000000001',
+    ),
+    (error) => assertApiError(error, 'DEVICE_DISABLED'),
+  );
+
+  await assert.rejects(
+    sendBranchDeviceHeartbeat(
+      baseConfig(createFetchMock(401, {
+        code: 'BRANCH_DEVICE_SESSION_EXPIRED',
+      })),
+      SESSION_TOKEN,
+    ),
+    (error) => assertApiError(error, 'SESSION_EXPIRED'),
+  );
 });
 
 test('session token is returned only by successful session issue result', async () => {

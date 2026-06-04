@@ -74,6 +74,16 @@ export const AGENT_MODES = [
 
 export type AgentMode = (typeof AGENT_MODES)[number];
 
+export const AGENT_CONNECTION_STATUSES = [
+  'DISCONNECTED',
+  'CHECKING_ACTIVATION',
+  'CONNECTED',
+  'LOCKED',
+] as const;
+
+export type AgentConnectionStatus =
+  (typeof AGENT_CONNECTION_STATUSES)[number];
+
 export interface BranchDeviceBranchSummary {
   id: string;
   code: string | null;
@@ -147,6 +157,18 @@ export interface BranchDeviceSessionChallengeResponse {
   timestamp: string;
   expiresAt: string;
   signingPayload: string;
+}
+
+export type BranchDeviceSessionChallengeValidationErrorCode =
+  | 'SESSION_CHALLENGE_INVALID'
+  | 'CHALLENGE_EXPIRED'
+  | 'SIGNING_PAYLOAD_MISMATCH';
+
+export class BranchDeviceSessionChallengeValidationError extends Error {
+  constructor(readonly code: BranchDeviceSessionChallengeValidationErrorCode) {
+    super(code);
+    this.name = 'BranchDeviceSessionChallengeValidationError';
+  }
 }
 
 export interface BranchDeviceSessionIssueRequest {
@@ -224,6 +246,10 @@ export interface DeviceRegistrationSnapshot {
   deviceLabel?: string;
   claimedAt?: string;
   serverStatus?: BranchDeviceStatusValue;
+  connectionStatus?: AgentConnectionStatus;
+  sessionStatus?: string;
+  sessionExpiresAt?: string | null;
+  lastActivationCheckAt?: string;
   capabilities: DeviceCapability[];
   mode: AgentMode;
   message: string;
@@ -234,6 +260,52 @@ export function buildBranchDeviceSessionSigningPayload({
   deviceId,
   challenge,
   timestamp,
-}: BranchDeviceSessionIssueRequest): string {
+}: Pick<BranchDeviceSessionIssueRequest, 'deviceId' | 'challenge' | 'timestamp'>): string {
   return `JP_BRANCH_DEVICE_SESSION_V1\n${deviceId}\n${challenge}\n${timestamp}`;
+}
+
+export function validateBranchDeviceSessionChallengeSigningPayload({
+  deviceId,
+  challenge,
+  nowMs = Date.now(),
+  minValidityMs = 5_000,
+}: {
+  deviceId: string;
+  challenge: BranchDeviceSessionChallengeResponse;
+  nowMs?: number;
+  minValidityMs?: number;
+}): string {
+  if (
+    !challenge.challenge.trim() ||
+    !challenge.timestamp.trim() ||
+    !challenge.expiresAt.trim() ||
+    !challenge.signingPayload.trim()
+  ) {
+    throw new BranchDeviceSessionChallengeValidationError('SESSION_CHALLENGE_INVALID');
+  }
+
+  const timestamp = parseIsoTimestamp(challenge.timestamp);
+  const expiresAt = parseIsoTimestamp(challenge.expiresAt);
+  if (timestamp === null || expiresAt === null) {
+    throw new BranchDeviceSessionChallengeValidationError('SESSION_CHALLENGE_INVALID');
+  }
+  if (expiresAt <= nowMs + minValidityMs) {
+    throw new BranchDeviceSessionChallengeValidationError('CHALLENGE_EXPIRED');
+  }
+
+  const expectedPayload = buildBranchDeviceSessionSigningPayload({
+    deviceId,
+    challenge: challenge.challenge,
+    timestamp: challenge.timestamp,
+  });
+  if (challenge.signingPayload !== expectedPayload) {
+    throw new BranchDeviceSessionChallengeValidationError('SIGNING_PAYLOAD_MISMATCH');
+  }
+  return expectedPayload;
+}
+
+function parseIsoTimestamp(value: string): number | null {
+  if (!value.trim()) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
