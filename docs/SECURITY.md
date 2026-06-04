@@ -7,14 +7,14 @@ requests that do not include valid approved device proof.
 
 ## Current Phase
 
-JPDEVAGENT-R3-B-D-D-B adds a manual Check Activation action on top of the real
-setup-code claim flow. The action asks the API for a device session challenge,
-rebuilds the canonical payload locally, signs it with the local Ed25519 private
-key, and requests a short-lived device session.
+JPDEVAGENT-R3-B-D-D-C-B adds a heartbeat lifecycle manager on top of the real
+setup-code claim flow and manual Check Activation action. After a device
+session is issued, the main process sends heartbeats to Jade-Palace-API using
+the memory-only device session token.
 
 - No automatic pending activation polling.
 - No automatic active device session challenge/sign/issue loop.
-- No device session heartbeat loop.
+- No automatic device session refresh loop.
 - No POS forwarding.
 - No printer bridge implementation.
 - No NFC hardware integration.
@@ -97,11 +97,21 @@ The client:
   fingerprint hashes, session tokens, or Authorization header values
 
 The raw device session token is returned only from the session issue function.
-In this phase the main process stores the token in memory only. It is cleared
-before setup-code claim, before manual activation retries, after activation
-failures, on local mock disable/activation transitions, and on app quit. It is
-never persisted, logged, sent through preload, rendered, or exposed by the local
-proxy.
+In this phase the main process stores the token in memory only and uses it only
+for the heartbeat endpoint after successful session issue. It is cleared before
+setup-code claim, before manual activation retries, after activation failures,
+after terminal heartbeat failures, on local mock disable/activation transitions,
+and on app quit. It is never persisted, logged, sent through preload, rendered,
+or exposed by the local proxy.
+
+Heartbeat failures fail closed:
+
+- API unavailable, rate limit, and generic heartbeat failures enter a
+  reconnecting state with backoff and disable future proxy-forwarding
+  eligibility until a heartbeat succeeds.
+- disabled, denied, revoked, not-active, malformed, unauthorized, invalid-token,
+  and expired-token outcomes clear the memory-only token and lock the device
+  into a safe reset/admin-review state.
 
 The manual activation check fails closed when the API challenge is malformed,
 expired or near expiry, or when the server `signingPayload` does not exactly
@@ -128,8 +138,9 @@ Current endpoints:
 
 `POST /proxy/test` is dev-only and does not forward to Jade-Palace-API.
 
-R3-B-D-B does not add proxy forwarding. Future forwarding remains gated on an
-active approved device session plus strict path/capability allowlists.
+R3-B-D-D-C-B does not add proxy forwarding. Future forwarding remains gated on
+an active approved device session, a fresh successful heartbeat, and strict
+path/capability allowlists.
 
 ## Future Proxy Proof
 

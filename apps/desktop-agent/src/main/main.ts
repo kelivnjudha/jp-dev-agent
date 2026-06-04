@@ -8,21 +8,27 @@ import {
   claimBranchDeviceSetupCode,
   issueBranchDeviceSession,
   requestBranchDeviceSessionChallenge,
+  sendBranchDeviceHeartbeat,
 } from '@jade-dev-agent/agent-api-client';
 import {
+  completeHeartbeat,
   completeActivationCheck,
   createInitialAgentState,
   createInitialAgentStateFromPending,
   createPendingActivationState,
   disableDevice,
   failActivationCheck,
+  failHeartbeatTerminal,
+  failHeartbeatTransient,
   failSetupCodeClaim,
   mockActivateDevice,
+  startHeartbeatLifecycle as startHeartbeatStateLifecycle,
   startActivationCheck,
   startSetupCodeClaim,
   toRegistrationSnapshot,
   type ActivationCheckErrorCode,
   type AgentState,
+  type HeartbeatFailureErrorCode,
   type SetupCodeClaimErrorCode,
 } from '@jade-dev-agent/agent-core';
 import {
@@ -45,6 +51,7 @@ import { PlaceholderNfcReaderAdapter } from '@jade-dev-agent/nfc-adapter';
 import { PlaceholderPrinterAdapter } from '@jade-dev-agent/printer-adapter';
 import type {
   AgentHealth,
+  BranchDeviceStatusValue,
   DeviceCapability,
   PendingDeviceRegistrationState,
   SafeDeviceIdentity,
@@ -63,11 +70,17 @@ const DEFAULT_MOCK_CAPABILITIES: DeviceCapability[] = [
   'POS_TERMINAL',
   'BARCODE_SCANNER',
 ];
+const HEARTBEAT_INTERVAL_MS = 45_000;
+const HEARTBEAT_RECONNECT_DELAYS_MS = [5_000, 15_000, 30_000, 60_000] as const;
 let mainWindow: BrowserWindow | null = null;
 let state: AgentState = createInitialAgentState(false);
 let proxy: RunningAgentProxy | null = null;
 let storage: DeviceStorage | null = null;
 let deviceSessionToken: string | null = null;
+let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+let heartbeatInFlight = false;
+let heartbeatLifecycleVersion = 0;
+let activationCheckInFlight = false;
 
 const printerAdapter = new PlaceholderPrinterAdapter();
 const nfcAdapter = new PlaceholderNfcReaderAdapter();
@@ -79,6 +92,7 @@ function getHealth(): AgentHealth {
     'DENIED',
     'REVOKED',
     'RESET_REQUIRED',
+    'SESSION_EXPIRED_RETRYING',
   ]);
   return {
     ok: !unhealthyStatuses.has(state.status),
@@ -88,6 +102,7 @@ function getHealth(): AgentHealth {
       enabled: proxy !== null,
       host: '127.0.0.1',
       port: proxy?.port ?? DEFAULT_PROXY_PORT,
+      futureForwardingEligible: state.futureProxyForwardingEligible === true,
     },
     capabilities: [...state.capabilities],
     appVersion: APP_VERSION,
@@ -107,6 +122,145 @@ function getSnapshot() {
 
 function clearDeviceSessionToken(): void {
   deviceSessionToken = null;
+}
+
+function clearHeartbeatTimer(): void {
+  if (!heartbeatTimer) return;
+  clearTimeout(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+function stopHeartbeatLifecycle(options: { clearToken?: boolean } = {}): void {
+  heartbeatLifecycleVersion += 1;
+  clearHeartbeatTimer();
+  heartbeatInFlight = false;
+  if (options.clearToken ?? true) clearDeviceSessionToken();
+}
+
+function scheduleHeartbeatTimer(version: number, delayMs: number): string {
+  clearHeartbeatTimer();
+  const nextHeartbeatAt = new Date(Date.now() + delayMs).toISOString();
+  heartbeatTimer = setTimeout(() => {
+    void runHeartbeat(version);
+  }, delayMs);
+  return nextHeartbeatAt;
+}
+
+function startHeartbeatLifecycle(): void {
+  if (!deviceSessionToken || state.status !== 'ACTIVE') return;
+  const version = heartbeatLifecycleVersion + 1;
+  heartbeatLifecycleVersion = version;
+  heartbeatInFlight = false;
+  const nextHeartbeatAt = scheduleHeartbeatTimer(version, HEARTBEAT_INTERVAL_MS);
+  state = startHeartbeatStateLifecycle(state, nextHeartbeatAt);
+}
+
+function ensureHeartbeatLifecycle(): void {
+  if (!deviceSessionToken || state.status !== 'ACTIVE') return;
+  if (heartbeatTimer || heartbeatInFlight) return;
+  const version = heartbeatLifecycleVersion || 1;
+  heartbeatLifecycleVersion = version;
+  const nextHeartbeatAt = scheduleHeartbeatTimer(version, HEARTBEAT_INTERVAL_MS);
+  state = startHeartbeatStateLifecycle(state, nextHeartbeatAt);
+}
+
+async function runHeartbeat(version: number): Promise<void> {
+  if (version !== heartbeatLifecycleVersion || heartbeatInFlight) return;
+  heartbeatTimer = null;
+
+  if (!deviceSessionToken) {
+    stopHeartbeatLifecycle();
+    state = failHeartbeatTerminal(state, 'SESSION_TOKEN_MISSING');
+    return;
+  }
+
+  const apiBaseUrl = resolveApiBaseUrl();
+  if (!apiBaseUrl) {
+    stopHeartbeatLifecycle();
+    state = failHeartbeatTerminal(state, 'CONFIG_INVALID');
+    return;
+  }
+
+  heartbeatInFlight = true;
+  try {
+    const localIp = resolveLocalIpForClaim();
+    const heartbeat = await sendBranchDeviceHeartbeat(
+      {
+        apiBaseUrl,
+        appVersion: APP_VERSION,
+      },
+      deviceSessionToken,
+      localIp !== undefined ? { localIp } : {},
+    );
+    if (version !== heartbeatLifecycleVersion) return;
+
+    if (!heartbeat.ok) {
+      scheduleTransientHeartbeatRetry(version, 'HEARTBEAT_FAILED');
+      return;
+    }
+
+    if (heartbeat.device.status !== 'ACTIVE') {
+      stopHeartbeatLifecycle();
+      state = failHeartbeatTerminal(
+        state,
+        heartbeatFailureCodeForDeviceStatus(heartbeat.device.status),
+      );
+      return;
+    }
+
+    const nextHeartbeatAt = scheduleHeartbeatTimer(version, HEARTBEAT_INTERVAL_MS);
+    state = completeHeartbeat(state, heartbeat.session, { nextHeartbeatAt });
+  } catch (error) {
+    if (version !== heartbeatLifecycleVersion) return;
+    const errorCode = mapHeartbeatFailure(error);
+    if (isTransientHeartbeatFailure(errorCode)) {
+      scheduleTransientHeartbeatRetry(version, errorCode);
+      return;
+    }
+    stopHeartbeatLifecycle();
+    state = failHeartbeatTerminal(state, errorCode);
+  } finally {
+    if (version === heartbeatLifecycleVersion) {
+      heartbeatInFlight = false;
+    }
+  }
+}
+
+function scheduleTransientHeartbeatRetry(
+  version: number,
+  errorCode: HeartbeatFailureErrorCode,
+): void {
+  const nextFailureCount = (state.heartbeatFailures ?? 0) + 1;
+  const backoffIndex = Math.min(
+    nextFailureCount - 1,
+    HEARTBEAT_RECONNECT_DELAYS_MS.length - 1,
+  );
+  const delayMs = HEARTBEAT_RECONNECT_DELAYS_MS[backoffIndex] ?? 60_000;
+  const nextHeartbeatAt = scheduleHeartbeatTimer(version, delayMs);
+  state = failHeartbeatTransient(state, errorCode, { nextHeartbeatAt });
+}
+
+function isTransientHeartbeatFailure(errorCode: HeartbeatFailureErrorCode): boolean {
+  return (
+    errorCode === 'API_UNAVAILABLE'
+    || errorCode === 'HEARTBEAT_FAILED'
+    || errorCode === 'RATE_LIMITED'
+  );
+}
+
+function heartbeatFailureCodeForDeviceStatus(
+  status: BranchDeviceStatusValue,
+): HeartbeatFailureErrorCode {
+  switch (status) {
+    case 'DISABLED':
+      return 'DEVICE_DISABLED';
+    case 'DENIED':
+      return 'DEVICE_DENIED';
+    case 'REVOKED':
+      return 'DEVICE_REVOKED';
+    default:
+      return 'DEVICE_NOT_ACTIVE';
+  }
 }
 
 async function ensureLocalIdentity(): Promise<SafeDeviceIdentity> {
@@ -218,6 +372,30 @@ function mapActivationFailure(error: unknown): ActivationCheckErrorCode {
   return 'UNKNOWN';
 }
 
+function mapHeartbeatFailure(error: unknown): HeartbeatFailureErrorCode {
+  if (error instanceof BranchDeviceApiError) {
+    switch (error.code) {
+      case 'DEVICE_NOT_ACTIVE':
+      case 'DEVICE_DISABLED':
+      case 'DEVICE_DENIED':
+      case 'DEVICE_REVOKED':
+      case 'SESSION_TOKEN_MISSING':
+      case 'SESSION_TOKEN_INVALID':
+      case 'SESSION_EXPIRED':
+      case 'UNAUTHORIZED':
+      case 'FORBIDDEN':
+      case 'API_UNAVAILABLE':
+      case 'HEARTBEAT_FAILED':
+      case 'RATE_LIMITED':
+      case 'MALFORMED_RESPONSE':
+        return error.code;
+      default:
+        return 'UNKNOWN';
+    }
+  }
+  return 'UNKNOWN';
+}
+
 function pendingDeviceFromState(): PendingDeviceRegistrationState | null {
   if (!state.deviceId || !state.safeHidPrefix || !state.claimedAt) return null;
   const pendingDevice: PendingDeviceRegistrationState = {
@@ -294,7 +472,7 @@ async function bootstrap(): Promise<void> {
 ipcMain.handle('agent:getSnapshot', () => getSnapshot());
 
 ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, deviceLabel: unknown) => {
-  clearDeviceSessionToken();
+  stopHeartbeatLifecycle();
   const rawSetupCode = typeof setupCode === 'string' ? setupCode.trim() : '';
   if (!rawSetupCode) {
     state = failSetupCodeClaim(state, 'SETUP_CODE_REQUIRED');
@@ -349,37 +527,43 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
 
 ipcMain.handle('agent:checkActivation', async () => {
   if (state.status === 'ACTIVE' && deviceSessionToken) {
+    ensureHeartbeatLifecycle();
     return getSnapshot();
   }
 
-  const apiBaseUrl = resolveApiBaseUrl();
-  if (!apiBaseUrl) {
-    clearDeviceSessionToken();
-    state = failActivationCheck(state, 'CONFIG_INVALID');
+  if (activationCheckInFlight) {
     return getSnapshot();
   }
 
-  const pendingDevice = (await storage?.readPendingDevice()) ?? pendingDeviceFromState();
-  if (!pendingDevice) {
-    clearDeviceSessionToken();
-    state = failActivationCheck(state, 'UNKNOWN');
-    return getSnapshot();
-  }
-
-  const identity = await storage?.readIdentity();
-  if (!identity) {
-    clearDeviceSessionToken();
-    state = failActivationCheck(
-      createPendingActivationState(pendingDevice),
-      'LOCAL_IDENTITY_MISSING',
-    );
-    return getSnapshot();
-  }
-
-  clearDeviceSessionToken();
-  state = startActivationCheck(createPendingActivationState(pendingDevice));
-
+  activationCheckInFlight = true;
   try {
+    const apiBaseUrl = resolveApiBaseUrl();
+    if (!apiBaseUrl) {
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(state, 'CONFIG_INVALID');
+      return getSnapshot();
+    }
+
+    const pendingDevice = (await storage?.readPendingDevice()) ?? pendingDeviceFromState();
+    if (!pendingDevice) {
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(state, 'UNKNOWN');
+      return getSnapshot();
+    }
+
+    const identity = await storage?.readIdentity();
+    if (!identity) {
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(
+        createPendingActivationState(pendingDevice),
+        'LOCAL_IDENTITY_MISSING',
+      );
+      return getSnapshot();
+    }
+
+    stopHeartbeatLifecycle();
+    state = startActivationCheck(createPendingActivationState(pendingDevice));
+
     const config = {
       apiBaseUrl,
       appVersion: APP_VERSION,
@@ -404,9 +588,12 @@ ipcMain.handle('agent:checkActivation', async () => {
     });
     deviceSessionToken = sessionIssue.sessionToken;
     state = completeActivationCheck(state, sessionIssue.session);
+    startHeartbeatLifecycle();
   } catch (error) {
-    clearDeviceSessionToken();
+    stopHeartbeatLifecycle();
     state = failActivationCheck(state, mapActivationFailure(error));
+  } finally {
+    activationCheckInFlight = false;
   }
 
   return getSnapshot();
@@ -414,14 +601,14 @@ ipcMain.handle('agent:checkActivation', async () => {
 
 ipcMain.handle('agent:mockActivate', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
-  clearDeviceSessionToken();
+  stopHeartbeatLifecycle();
   state = mockActivateDevice(state, DEFAULT_MOCK_CAPABILITIES);
   return getSnapshot();
 });
 
 ipcMain.handle('agent:disable', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
-  clearDeviceSessionToken();
+  stopHeartbeatLifecycle();
   state = disableDevice(state, 'DEV ONLY: device disabled locally.');
   return getSnapshot();
 });
@@ -448,7 +635,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', (event) => {
-  clearDeviceSessionToken();
+  stopHeartbeatLifecycle();
   if (!proxy) return;
   event.preventDefault();
   const currentProxy = proxy;

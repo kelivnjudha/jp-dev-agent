@@ -37,6 +37,23 @@ export type ActivationCheckErrorCode =
   | 'LOCAL_IDENTITY_MISSING'
   | 'UNKNOWN';
 
+export type HeartbeatFailureErrorCode =
+  | 'DEVICE_NOT_ACTIVE'
+  | 'DEVICE_DISABLED'
+  | 'DEVICE_DENIED'
+  | 'DEVICE_REVOKED'
+  | 'SESSION_TOKEN_MISSING'
+  | 'SESSION_TOKEN_INVALID'
+  | 'SESSION_EXPIRED'
+  | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
+  | 'API_UNAVAILABLE'
+  | 'HEARTBEAT_FAILED'
+  | 'RATE_LIMITED'
+  | 'MALFORMED_RESPONSE'
+  | 'CONFIG_INVALID'
+  | 'UNKNOWN';
+
 export interface AgentState {
   status: AgentRegistrationStatus;
   mode: AgentMode;
@@ -51,6 +68,11 @@ export interface AgentState {
   sessionStatus?: string;
   sessionExpiresAt?: string | null;
   lastActivationCheckAt?: string;
+  lastHeartbeatAt?: string;
+  nextHeartbeatAt?: string;
+  heartbeatFailures?: number;
+  lastHeartbeatErrorCode?: HeartbeatFailureErrorCode;
+  futureProxyForwardingEligible?: boolean;
   message: string;
   updatedAt: string;
 }
@@ -112,9 +134,12 @@ export function createInitialAgentStateFromPending(
 }
 
 export function startSetupCodeClaim(state: AgentState): AgentState {
+  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
   return {
-    ...state,
+    ...stateWithoutActiveSession,
     status: 'SETUP_CODE_SUBMITTING',
+    mode: 'SETUP',
+    connectionStatus: 'DISCONNECTED',
     message: 'Submitting setup code. The code is not stored on this device.',
     updatedAt: new Date().toISOString(),
   };
@@ -124,17 +149,21 @@ export function failSetupCodeClaim(
   state: AgentState,
   errorCode: SetupCodeClaimErrorCode,
 ): AgentState {
+  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
   return {
-    ...state,
+    ...stateWithoutActiveSession,
     status: 'ERROR',
+    mode: 'SETUP',
+    connectionStatus: 'LOCKED',
     message: safeSetupCodeClaimErrorMessage(errorCode),
     updatedAt: new Date().toISOString(),
   };
 }
 
 export function startActivationCheck(state: AgentState): AgentState {
+  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
   return {
-    ...state,
+    ...stateWithoutActiveSession,
     status: 'ACTIVE_SESSION_CONNECTING',
     connectionStatus: 'CHECKING_ACTIVATION',
     lastActivationCheckAt: new Date().toISOString(),
@@ -147,8 +176,16 @@ export function completeActivationCheck(
   state: AgentState,
   session: BranchDeviceSessionSummary,
 ): AgentState {
+  const {
+    lastHeartbeatAt: _lastHeartbeatAt,
+    nextHeartbeatAt: _nextHeartbeatAt,
+    heartbeatFailures: _heartbeatFailures,
+    lastHeartbeatErrorCode: _lastHeartbeatErrorCode,
+    futureProxyForwardingEligible: _futureProxyForwardingEligible,
+    ...stateWithoutHeartbeat
+  } = state;
   return {
-    ...state,
+    ...stateWithoutHeartbeat,
     status: 'ACTIVE',
     mode: modeForCapabilities(state.capabilities),
     serverStatus: 'ACTIVE',
@@ -161,6 +198,114 @@ export function completeActivationCheck(
   };
 }
 
+export function startHeartbeatLifecycle(
+  state: AgentState,
+  nextHeartbeatAt: string,
+): AgentState {
+  const {
+    lastHeartbeatErrorCode: _lastHeartbeatErrorCode,
+    ...stateWithoutHeartbeatError
+  } = state;
+  return {
+    ...stateWithoutHeartbeatError,
+    status: 'ACTIVE',
+    connectionStatus: 'CONNECTED',
+    nextHeartbeatAt,
+    heartbeatFailures: 0,
+    futureProxyForwardingEligible: false,
+    message: 'Secure device session established. Heartbeat scheduled.',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function completeHeartbeat(
+  state: AgentState,
+  session: BranchDeviceSessionSummary,
+  options: {
+    nowIso?: string;
+    nextHeartbeatAt: string;
+  },
+): AgentState {
+  const now = options.nowIso ?? new Date().toISOString();
+  const {
+    lastHeartbeatErrorCode: _lastHeartbeatErrorCode,
+    ...stateWithoutHeartbeatError
+  } = state;
+  return {
+    ...stateWithoutHeartbeatError,
+    status: 'ACTIVE',
+    connectionStatus: 'CONNECTED',
+    sessionStatus: session.status,
+    sessionExpiresAt: session.expiresAt ?? state.sessionExpiresAt ?? null,
+    lastHeartbeatAt: session.lastSeenAt ?? now,
+    nextHeartbeatAt: options.nextHeartbeatAt,
+    heartbeatFailures: 0,
+    futureProxyForwardingEligible: true,
+    message: 'Secure heartbeat confirmed.',
+    updatedAt: now,
+  };
+}
+
+export function failHeartbeatTransient(
+  state: AgentState,
+  errorCode: HeartbeatFailureErrorCode,
+  options: {
+    nowIso?: string;
+    nextHeartbeatAt: string;
+  },
+): AgentState {
+  const now = options.nowIso ?? new Date().toISOString();
+  return {
+    ...state,
+    status: 'SESSION_EXPIRED_RETRYING',
+    connectionStatus: 'RECONNECTING',
+    nextHeartbeatAt: options.nextHeartbeatAt,
+    heartbeatFailures: (state.heartbeatFailures ?? 0) + 1,
+    lastHeartbeatErrorCode: errorCode,
+    futureProxyForwardingEligible: false,
+    message: safeHeartbeatErrorMessage(errorCode),
+    updatedAt: now,
+  };
+}
+
+export function failHeartbeatTerminal(
+  state: AgentState,
+  errorCode: HeartbeatFailureErrorCode,
+): AgentState {
+  const now = new Date().toISOString();
+  const {
+    sessionStatus: _sessionStatus,
+    sessionExpiresAt: _sessionExpiresAt,
+    nextHeartbeatAt: _nextHeartbeatAt,
+    serverStatus: _serverStatus,
+    futureProxyForwardingEligible: _futureProxyForwardingEligible,
+    ...stateWithoutActiveSession
+  } = state;
+  const base = {
+    ...stateWithoutActiveSession,
+    connectionStatus: 'LOCKED' as const,
+    heartbeatFailures: (state.heartbeatFailures ?? 0) + 1,
+    lastHeartbeatErrorCode: errorCode,
+    futureProxyForwardingEligible: false,
+    message: safeHeartbeatErrorMessage(errorCode),
+    updatedAt: now,
+  };
+
+  switch (errorCode) {
+    case 'DEVICE_DISABLED':
+      return { ...base, status: 'DISABLED', mode: 'SETUP', serverStatus: 'DISABLED' };
+    case 'DEVICE_DENIED':
+      return { ...base, status: 'DENIED', mode: 'SETUP', serverStatus: 'DENIED' };
+    case 'DEVICE_REVOKED':
+      return { ...base, status: 'REVOKED', mode: 'SETUP', serverStatus: 'REVOKED' };
+    case 'MALFORMED_RESPONSE':
+    case 'CONFIG_INVALID':
+      return { ...base, status: 'ERROR', mode: 'SETUP', connectionStatus: 'ERROR' };
+    default:
+      return { ...base, status: 'RESET_REQUIRED', mode: 'SETUP' };
+  }
+}
+
 export function failActivationCheck(
   state: AgentState,
   errorCode: ActivationCheckErrorCode,
@@ -169,6 +314,11 @@ export function failActivationCheck(
   const {
     sessionStatus: _sessionStatus,
     sessionExpiresAt: _sessionExpiresAt,
+    lastHeartbeatAt: _lastHeartbeatAt,
+    nextHeartbeatAt: _nextHeartbeatAt,
+    heartbeatFailures: _heartbeatFailures,
+    lastHeartbeatErrorCode: _lastHeartbeatErrorCode,
+    futureProxyForwardingEligible: _futureProxyForwardingEligible,
     ...stateWithoutSession
   } = state;
   const base = {
@@ -261,6 +411,39 @@ export function safeActivationCheckErrorMessage(
   }
 }
 
+export function safeHeartbeatErrorMessage(
+  errorCode: HeartbeatFailureErrorCode,
+): string {
+  switch (errorCode) {
+    case 'API_UNAVAILABLE':
+      return 'Reconnecting to Jade Palace API. Device actions are temporarily locked.';
+    case 'HEARTBEAT_FAILED':
+      return 'Device heartbeat failed. Reconnecting before device actions can continue.';
+    case 'RATE_LIMITED':
+      return 'Heartbeat was rate limited. Reconnecting after a short delay.';
+    case 'DEVICE_DISABLED':
+      return 'This device is disabled. Contact an admin.';
+    case 'DEVICE_DENIED':
+      return 'This device was denied. Reset is required before trying again.';
+    case 'DEVICE_REVOKED':
+      return 'This device was revoked. Reset is required before re-enrollment.';
+    case 'DEVICE_NOT_ACTIVE':
+      return 'Device is no longer active. Reset or admin review is required.';
+    case 'SESSION_TOKEN_MISSING':
+    case 'SESSION_TOKEN_INVALID':
+    case 'SESSION_EXPIRED':
+    case 'UNAUTHORIZED':
+    case 'FORBIDDEN':
+      return 'Device session is no longer valid. Reset or admin review is required.';
+    case 'MALFORMED_RESPONSE':
+      return 'Unexpected heartbeat response. Device remains locked.';
+    case 'CONFIG_INVALID':
+      return 'Device API configuration is invalid. Device remains locked.';
+    default:
+      return 'Device heartbeat failed. Device remains locked.';
+  }
+}
+
 export function mockSubmitSetupCodeForPendingActivation(
   state: AgentState,
   setupCode: string,
@@ -302,9 +485,12 @@ export function mockActivateDevice(
 }
 
 export function disableDevice(state: AgentState, reason = 'Disabled'): AgentState {
+  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
   return {
-    ...state,
+    ...stateWithoutActiveSession,
     status: 'DISABLED',
+    connectionStatus: 'LOCKED',
+    futureProxyForwardingEligible: false,
     message: reason,
     updatedAt: new Date().toISOString(),
   };
@@ -351,6 +537,21 @@ export function toRegistrationSnapshot(
   if (state.lastActivationCheckAt !== undefined) {
     snapshot.lastActivationCheckAt = state.lastActivationCheckAt;
   }
+  if (state.lastHeartbeatAt !== undefined) {
+    snapshot.lastHeartbeatAt = state.lastHeartbeatAt;
+  }
+  if (state.nextHeartbeatAt !== undefined) {
+    snapshot.nextHeartbeatAt = state.nextHeartbeatAt;
+  }
+  if (state.heartbeatFailures !== undefined) {
+    snapshot.heartbeatFailures = state.heartbeatFailures;
+  }
+  if (state.lastHeartbeatErrorCode !== undefined) {
+    snapshot.lastHeartbeatErrorCode = state.lastHeartbeatErrorCode;
+  }
+  if (state.futureProxyForwardingEligible !== undefined) {
+    snapshot.futureProxyForwardingEligible = state.futureProxyForwardingEligible;
+  }
 
   return snapshot;
 }
@@ -360,4 +561,18 @@ function modeForCapabilities(capabilities: DeviceCapability[]): AgentMode {
   if (capabilities.includes('PRINTER_BRIDGE')) return 'PRINTER_BRIDGE';
   if (capabilities.includes('NFC_READER')) return 'NFC_READER';
   return 'POS';
+}
+
+function stripActiveSessionMetadata(state: AgentState): AgentState {
+  const {
+    sessionStatus: _sessionStatus,
+    sessionExpiresAt: _sessionExpiresAt,
+    lastHeartbeatAt: _lastHeartbeatAt,
+    nextHeartbeatAt: _nextHeartbeatAt,
+    heartbeatFailures: _heartbeatFailures,
+    lastHeartbeatErrorCode: _lastHeartbeatErrorCode,
+    futureProxyForwardingEligible: _futureProxyForwardingEligible,
+    ...stateWithoutActiveSession
+  } = state;
+  return stateWithoutActiveSession;
 }

@@ -107,6 +107,18 @@
               <dt>Last check</dt>
               <dd id="activation-checked-detail">Not yet</dd>
             </div>
+            <div>
+              <dt>Last heartbeat</dt>
+              <dd id="last-heartbeat-detail">Not yet</dd>
+            </div>
+            <div>
+              <dt>Next heartbeat</dt>
+              <dd id="next-heartbeat-detail">Not yet</dd>
+            </div>
+            <div>
+              <dt>Heartbeat failures</dt>
+              <dd id="heartbeat-failures-detail">0</dd>
+            </div>
           </dl>
         </article>
 
@@ -138,7 +150,7 @@
 
       <footer>
         <button id="refresh" class="ghost">Refresh status</button>
-        <span>Session heartbeat, automatic refresh, and activation polling come in later phases.</span>
+        <span>Heartbeat is automatic after activation. Session refresh and activation polling come in later phases.</span>
       </footer>
     </main>
     <script type="module" src="./renderer.js"></script>

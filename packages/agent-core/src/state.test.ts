@@ -2,18 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  completeHeartbeat,
   createInitialAgentStateFromPending,
   createPendingActivationState,
   createInitialAgentState,
   completeActivationCheck,
   disableDevice,
   failActivationCheck,
+  failHeartbeatTerminal,
+  failHeartbeatTransient,
   failSetupCodeClaim,
   maskSetupCode,
   mockActivateDevice,
   mockSubmitSetupCodeForPendingActivation,
   safeActivationCheckErrorMessage,
+  safeHeartbeatErrorMessage,
   safeSetupCodeClaimErrorMessage,
+  startHeartbeatLifecycle,
   startActivationCheck,
   startSetupCodeClaim,
   toRegistrationSnapshot,
@@ -101,6 +106,166 @@ test('successful activation check stores safe session metadata only', () => {
   assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
   assert.equal(JSON.stringify(snapshot).includes('privateKeyPem'), false);
   assert.equal(JSON.stringify(snapshot).includes('publicKeyPem'), false);
+});
+
+test('heartbeat lifecycle exposes safe scheduling metadata only', () => {
+  const pending = createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: { id: 'b0000000-0000-4000-8000-000000000001', code: 'BKK', name: 'Bangkok' },
+    allowedCapabilities: ['POS_TERMINAL', 'BARCODE_SCANNER'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  });
+  const active = completeActivationCheck(startActivationCheck(pending), {
+    status: 'ACTIVE',
+    expiresAt: '2026-06-04T13:00:00.000Z',
+  });
+  const heartbeatReady = startHeartbeatLifecycle(
+    active,
+    '2026-06-04T01:00:45.000Z',
+  );
+  const snapshot = toRegistrationSnapshot(heartbeatReady);
+
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.equal(snapshot.nextHeartbeatAt, '2026-06-04T01:00:45.000Z');
+  assert.equal(snapshot.heartbeatFailures, 0);
+  assert.equal(snapshot.futureProxyForwardingEligible, false);
+  assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
+  assert.equal(JSON.stringify(snapshot).includes('privateKeyPem'), false);
+});
+
+test('successful heartbeat keeps device connected and clears reconnect errors', () => {
+  const active = startHeartbeatLifecycle(
+    completeActivationCheck(
+      startActivationCheck(createPendingActivationState({
+        deviceId: 'd0000000-0000-4000-8000-000000000001',
+        serverStatus: 'PENDING_ACTIVATION',
+        branch: null,
+        allowedCapabilities: ['POS_TERMINAL'],
+        safeHidPrefix: 'ABCD-12345678',
+        claimedAt: '2026-06-04T01:00:00.000Z',
+      })),
+      { status: 'ACTIVE', expiresAt: '2026-06-04T13:00:00.000Z' },
+    ),
+    '2026-06-04T01:00:45.000Z',
+  );
+  const reconnecting = failHeartbeatTransient(active, 'API_UNAVAILABLE', {
+    nowIso: '2026-06-04T01:00:45.000Z',
+    nextHeartbeatAt: '2026-06-04T01:00:50.000Z',
+  });
+  const recovered = completeHeartbeat(reconnecting, {
+    status: 'ACTIVE',
+    expiresAt: '2026-06-04T13:00:00.000Z',
+    lastSeenAt: '2026-06-04T01:00:51.000Z',
+  }, {
+    nowIso: '2026-06-04T01:00:51.000Z',
+    nextHeartbeatAt: '2026-06-04T01:01:36.000Z',
+  });
+  const snapshot = toRegistrationSnapshot(recovered);
+
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.equal(snapshot.connectionStatus, 'CONNECTED');
+  assert.equal(snapshot.lastHeartbeatAt, '2026-06-04T01:00:51.000Z');
+  assert.equal(snapshot.nextHeartbeatAt, '2026-06-04T01:01:36.000Z');
+  assert.equal(snapshot.heartbeatFailures, 0);
+  assert.equal(snapshot.lastHeartbeatErrorCode, undefined);
+  assert.equal(snapshot.futureProxyForwardingEligible, true);
+});
+
+test('API unavailable heartbeat fails closed for future proxy forwarding but retries heartbeat', () => {
+  const active = startHeartbeatLifecycle(
+    completeActivationCheck(
+      startActivationCheck(createPendingActivationState({
+        deviceId: 'd0000000-0000-4000-8000-000000000001',
+        serverStatus: 'PENDING_ACTIVATION',
+        branch: null,
+        allowedCapabilities: ['POS_TERMINAL'],
+        safeHidPrefix: 'ABCD-12345678',
+        claimedAt: '2026-06-04T01:00:00.000Z',
+      })),
+      { status: 'ACTIVE', expiresAt: '2026-06-04T13:00:00.000Z' },
+    ),
+    '2026-06-04T01:00:45.000Z',
+  );
+  const reconnecting = failHeartbeatTransient(active, 'API_UNAVAILABLE', {
+    nowIso: '2026-06-04T01:00:45.000Z',
+    nextHeartbeatAt: '2026-06-04T01:00:50.000Z',
+  });
+
+  assert.equal(reconnecting.status, 'SESSION_EXPIRED_RETRYING');
+  assert.equal(reconnecting.connectionStatus, 'RECONNECTING');
+  assert.equal(reconnecting.futureProxyForwardingEligible, false);
+  assert.equal(reconnecting.heartbeatFailures, 1);
+  assert.equal(
+    safeHeartbeatErrorMessage('API_UNAVAILABLE'),
+    'Reconnecting to Jade Palace API. Device actions are temporarily locked.',
+  );
+});
+
+test('heartbeat device-state and token-boundary failures clear active session metadata', () => {
+  const active = startHeartbeatLifecycle(
+    completeActivationCheck(
+      startActivationCheck(createPendingActivationState({
+        deviceId: 'd0000000-0000-4000-8000-000000000001',
+        serverStatus: 'PENDING_ACTIVATION',
+        branch: null,
+        allowedCapabilities: ['POS_TERMINAL'],
+        safeHidPrefix: 'ABCD-12345678',
+        claimedAt: '2026-06-04T01:00:00.000Z',
+      })),
+      { status: 'ACTIVE', expiresAt: '2026-06-04T13:00:00.000Z' },
+    ),
+    '2026-06-04T01:00:45.000Z',
+  );
+  const notActive = failHeartbeatTerminal(active, 'DEVICE_NOT_ACTIVE');
+  const disabled = failHeartbeatTerminal(active, 'DEVICE_DISABLED');
+  const expired = failHeartbeatTerminal(active, 'SESSION_EXPIRED');
+
+  assert.equal(notActive.status, 'RESET_REQUIRED');
+  assert.equal(notActive.connectionStatus, 'LOCKED');
+  assert.equal(notActive.futureProxyForwardingEligible, false);
+  assert.equal(toRegistrationSnapshot(notActive).sessionStatus, undefined);
+  assert.equal(disabled.status, 'DISABLED');
+  assert.equal(disabled.serverStatus, 'DISABLED');
+  assert.equal(expired.status, 'RESET_REQUIRED');
+  assert.equal(toRegistrationSnapshot(expired).sessionExpiresAt, undefined);
+});
+
+test('setup and local disable transitions do not retain heartbeat proxy eligibility', () => {
+  const active = completeHeartbeat(
+    startHeartbeatLifecycle(
+      completeActivationCheck(
+        startActivationCheck(createPendingActivationState({
+          deviceId: 'd0000000-0000-4000-8000-000000000001',
+          serverStatus: 'PENDING_ACTIVATION',
+          branch: null,
+          allowedCapabilities: ['POS_TERMINAL'],
+          safeHidPrefix: 'ABCD-12345678',
+          claimedAt: '2026-06-04T01:00:00.000Z',
+        })),
+        { status: 'ACTIVE', expiresAt: '2026-06-04T13:00:00.000Z' },
+      ),
+      '2026-06-04T01:00:45.000Z',
+    ),
+    {
+      status: 'ACTIVE',
+      expiresAt: '2026-06-04T13:00:00.000Z',
+      lastSeenAt: '2026-06-04T01:00:45.000Z',
+    },
+    {
+      nowIso: '2026-06-04T01:00:45.000Z',
+      nextHeartbeatAt: '2026-06-04T01:01:30.000Z',
+    },
+  );
+  const setupSubmitting = startSetupCodeClaim(active);
+  const setupFailed = failSetupCodeClaim(active, 'SETUP_CODE_INVALID');
+  const disabled = disableDevice(active, 'Disabled locally');
+
+  assert.equal(toRegistrationSnapshot(setupSubmitting).futureProxyForwardingEligible, undefined);
+  assert.equal(toRegistrationSnapshot(setupFailed).lastHeartbeatAt, undefined);
+  assert.equal(toRegistrationSnapshot(disabled).futureProxyForwardingEligible, false);
+  assert.equal(toRegistrationSnapshot(disabled).sessionStatus, undefined);
 });
 
 test('not-active activation check returns pending state', () => {

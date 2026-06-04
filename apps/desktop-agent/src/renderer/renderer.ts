@@ -30,9 +30,23 @@ const claimedAtDetail = document.querySelector<HTMLElement>('#claimed-at-detail'
 const sessionStatusDetail = document.querySelector<HTMLElement>('#session-status-detail');
 const sessionExpiresDetail = document.querySelector<HTMLElement>('#session-expires-detail');
 const activationCheckedDetail = document.querySelector<HTMLElement>('#activation-checked-detail');
+const lastHeartbeatDetail = document.querySelector<HTMLElement>('#last-heartbeat-detail');
+const nextHeartbeatDetail = document.querySelector<HTMLElement>('#next-heartbeat-detail');
+const heartbeatFailuresDetail = document.querySelector<HTMLElement>('#heartbeat-failures-detail');
 
 function setText(element: Element | null, value: string): void {
   if (element) element.textContent = value;
+}
+
+function isSetupLockedStatus(status: DeviceRegistrationSnapshot['status']): boolean {
+  return [
+    'SETUP_CODE_SUBMITTING',
+    'PENDING_ACTIVATION',
+    'ACTIVE_SESSION_CONNECTING',
+    'ACTIVE',
+    'SESSION_EXPIRED_RETRYING',
+    'RESET_REQUIRED',
+  ].includes(status);
 }
 
 function render(next: ViewModel): void {
@@ -55,6 +69,9 @@ function render(next: ViewModel): void {
   );
   setText(sessionExpiresDetail, formatDateTime(registration.sessionExpiresAt ?? undefined));
   setText(activationCheckedDetail, formatDateTime(registration.lastActivationCheckAt));
+  setText(lastHeartbeatDetail, formatDateTime(registration.lastHeartbeatAt));
+  setText(nextHeartbeatDetail, formatDateTime(registration.nextHeartbeatAt));
+  setText(heartbeatFailuresDetail, String(registration.heartbeatFailures ?? 0));
   setText(
     capabilityList,
     registration.capabilities.length
@@ -78,22 +95,16 @@ function render(next: ViewModel): void {
     devControls.hidden = !next.controls.mockFlowEnabled;
   }
   if (submitButton) {
-    submitButton.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
-      registration.status,
-    );
+    submitButton.disabled = isSetupLockedStatus(registration.status);
     submitButton.textContent = registration.status === 'SETUP_CODE_SUBMITTING'
       ? 'Claiming...'
       : 'Claim Device';
   }
   if (setupInput) {
-    setupInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
-      registration.status,
-    );
+    setupInput.disabled = isSetupLockedStatus(registration.status);
   }
   if (deviceLabelInput) {
-    deviceLabelInput.disabled = ['SETUP_CODE_SUBMITTING', 'PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING', 'ACTIVE', 'RESET_REQUIRED'].includes(
-      registration.status,
-    );
+    deviceLabelInput.disabled = isSetupLockedStatus(registration.status);
     if (registration.deviceLabel) deviceLabelInput.value = registration.deviceLabel;
   }
   if (checkActivationButton) {
@@ -158,6 +169,9 @@ function formatConnectionStatus(
   connectionStatus: DeviceRegistrationSnapshot['connectionStatus'],
   sessionStatus: string | undefined,
 ): string {
+  if (connectionStatus && connectionStatus !== 'CONNECTED') {
+    return connectionStatus.replaceAll('_', ' ');
+  }
   if (sessionStatus) return sessionStatus.replaceAll('_', ' ');
   if (!connectionStatus) return 'Not connected';
   return connectionStatus.replaceAll('_', ' ');

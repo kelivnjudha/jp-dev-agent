@@ -78,7 +78,9 @@ export const AGENT_CONNECTION_STATUSES = [
   'DISCONNECTED',
   'CHECKING_ACTIVATION',
   'CONNECTED',
+  'RECONNECTING',
   'LOCKED',
+  'ERROR',
 ] as const;
 
 export type AgentConnectionStatus =
@@ -226,6 +228,7 @@ export interface AgentHealth {
     enabled: boolean;
     host: '127.0.0.1';
     port: number;
+    futureForwardingEligible: boolean;
   };
   capabilities: DeviceCapability[];
   appVersion: string;
@@ -250,6 +253,11 @@ export interface DeviceRegistrationSnapshot {
   sessionStatus?: string;
   sessionExpiresAt?: string | null;
   lastActivationCheckAt?: string;
+  lastHeartbeatAt?: string;
+  nextHeartbeatAt?: string;
+  heartbeatFailures?: number;
+  lastHeartbeatErrorCode?: string;
+  futureProxyForwardingEligible?: boolean;
   capabilities: DeviceCapability[];
   mode: AgentMode;
   message: string;

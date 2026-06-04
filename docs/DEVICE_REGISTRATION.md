@@ -19,8 +19,9 @@ hardware.
 
 R3-B-D-C implements steps 4 through 7 in the desktop Agent with the real
 setup-code claim API. R3-B-D-D-B adds a manual Check Activation action for step
-10 after an admin activates the pending device. Pending activation polling,
-automatic session refresh, and heartbeat remain deferred.
+10 after an admin activates the pending device. R3-B-D-D-C-B starts automatic
+heartbeats after successful session issue. Pending activation polling and
+automatic session refresh remain deferred.
 
 After claim succeeds, the Agent displays Waiting for Admin Activation and tells
 operators to ask Main Admin or an authorized Admin to activate the device in
@@ -118,8 +119,9 @@ Session issue:
 
 The raw `sessionToken` is sensitive and returned once. Later phases must keep
 it out of renderer state, logs, persisted storage, and error objects. In this
-phase the main process keeps the token in memory only and clears it on retry,
-failure, local mock state changes, and app quit.
+phase the main process keeps the token in memory only, uses it for heartbeats,
+and clears it on retry, failure, terminal heartbeat errors, local mock state
+changes, and app quit.
 
 Heartbeat:
 
@@ -127,6 +129,10 @@ Heartbeat:
 - Auth: `Authorization: Bearer <device-session-token>`
 - Request: optional `appVersion`, optional `localIp`
 - Response: `ok`, `device`, `session`
+- Desktop Agent cadence: every 45 seconds after a successful session issue
+- API unavailable/rate-limited failures: reconnecting with backoff
+- disabled/denied/revoked/not-active/token-boundary failures: token cleared and
+  device locked for reset/admin review
 
 ## API Enforcement Requirement
 
@@ -154,7 +160,6 @@ This phase intentionally defers:
 
 - pending activation status polling
 - automatic active device session challenge/sign/issue refresh
-- session heartbeat loop
 - JPPOS proxy integration
 - POS API enforcement
 - printer integration
