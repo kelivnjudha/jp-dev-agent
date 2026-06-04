@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   completeHeartbeat,
+  completeSessionRefresh,
   createInitialAgentStateFromPending,
   createPendingActivationState,
   createInitialAgentState,
@@ -11,18 +12,51 @@ import {
   failActivationCheck,
   failHeartbeatTerminal,
   failHeartbeatTransient,
+  failSessionRefreshTerminal,
+  failSessionRefreshTransient,
   failSetupCodeClaim,
   maskSetupCode,
   mockActivateDevice,
   mockSubmitSetupCodeForPendingActivation,
+  safeSessionRefreshErrorMessage,
   safeActivationCheckErrorMessage,
   safeHeartbeatErrorMessage,
   safeSetupCodeClaimErrorMessage,
+  scheduleSessionRefresh,
+  startSessionRefresh,
   startHeartbeatLifecycle,
   startActivationCheck,
   startSetupCodeClaim,
   toRegistrationSnapshot,
 } from './index.js';
+
+function createActiveHeartbeatState() {
+  return completeHeartbeat(
+    startHeartbeatLifecycle(
+      completeActivationCheck(
+        startActivationCheck(createPendingActivationState({
+          deviceId: 'd0000000-0000-4000-8000-000000000001',
+          serverStatus: 'PENDING_ACTIVATION',
+          branch: { id: 'b0000000-0000-4000-8000-000000000001', code: 'BKK', name: 'Bangkok' },
+          allowedCapabilities: ['POS_TERMINAL', 'BARCODE_SCANNER'],
+          safeHidPrefix: 'ABCD-12345678',
+          claimedAt: '2026-06-04T01:00:00.000Z',
+        })),
+        { status: 'ACTIVE', expiresAt: '2026-06-04T13:00:00.000Z' },
+      ),
+      '2026-06-04T01:00:45.000Z',
+    ),
+    {
+      status: 'ACTIVE',
+      expiresAt: '2026-06-04T13:00:00.000Z',
+      lastSeenAt: '2026-06-04T01:00:45.000Z',
+    },
+    {
+      nowIso: '2026-06-04T01:00:45.000Z',
+      nextHeartbeatAt: '2026-06-04T01:01:30.000Z',
+    },
+  );
+}
 
 test('maskSetupCode keeps only a safe prefix', () => {
   assert.equal(maskSetupCode('JPDA-1234-SECRET'), 'JPDA••••');
@@ -230,6 +264,84 @@ test('heartbeat device-state and token-boundary failures clear active session me
   assert.equal(disabled.serverStatus, 'DISABLED');
   assert.equal(expired.status, 'RESET_REQUIRED');
   assert.equal(toRegistrationSnapshot(expired).sessionExpiresAt, undefined);
+});
+
+test('session refresh scheduling exposes safe metadata without clearing fresh-heartbeat eligibility', () => {
+  const active = createActiveHeartbeatState();
+  assert.equal(active.futureProxyForwardingEligible, true);
+
+  const scheduled = scheduleSessionRefresh(active, '2026-06-04T12:59:00.000Z');
+  const snapshot = toRegistrationSnapshot(scheduled);
+
+  assert.equal(snapshot.nextSessionRefreshAt, '2026-06-04T12:59:00.000Z');
+  assert.equal(snapshot.sessionRefreshInFlight, false);
+  assert.equal(snapshot.futureProxyForwardingEligible, true);
+  assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
+});
+
+test('session refresh state disables future forwarding while keeping registration active', () => {
+  const refreshing = startSessionRefresh(createActiveHeartbeatState());
+  const snapshot = toRegistrationSnapshot(refreshing);
+
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.equal(snapshot.connectionStatus, 'REFRESHING');
+  assert.equal(snapshot.sessionRefreshInFlight, true);
+  assert.equal(snapshot.futureProxyForwardingEligible, false);
+  assert.equal(snapshot.message, 'Refreshing secure device session...');
+});
+
+test('successful session refresh replaces safe session metadata but waits for heartbeat before forwarding eligibility', () => {
+  const refreshing = startSessionRefresh(createActiveHeartbeatState());
+  const refreshed = completeSessionRefresh(
+    refreshing,
+    { status: 'ACTIVE', expiresAt: '2026-06-05T01:00:00.000Z' },
+    { nowIso: '2026-06-04T12:59:00.000Z' },
+  );
+  const snapshot = toRegistrationSnapshot(refreshed);
+
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.equal(snapshot.connectionStatus, 'CONNECTED');
+  assert.equal(snapshot.sessionExpiresAt, '2026-06-05T01:00:00.000Z');
+  assert.equal(snapshot.lastSessionRefreshAt, '2026-06-04T12:59:00.000Z');
+  assert.equal(snapshot.sessionRefreshInFlight, false);
+  assert.equal(snapshot.sessionRefreshFailures, 0);
+  assert.equal(snapshot.futureProxyForwardingEligible, false);
+});
+
+test('API unavailable during session refresh enters reconnecting with proxy eligibility false', () => {
+  const refreshing = startSessionRefresh(createActiveHeartbeatState());
+  const reconnecting = failSessionRefreshTransient(refreshing, 'API_UNAVAILABLE', {
+    nowIso: '2026-06-04T12:59:00.000Z',
+    nextSessionRefreshAt: '2026-06-04T12:59:05.000Z',
+  });
+  const snapshot = toRegistrationSnapshot(reconnecting);
+
+  assert.equal(snapshot.status, 'SESSION_EXPIRED_RETRYING');
+  assert.equal(snapshot.connectionStatus, 'RECONNECTING');
+  assert.equal(snapshot.nextSessionRefreshAt, '2026-06-04T12:59:05.000Z');
+  assert.equal(snapshot.sessionRefreshInFlight, false);
+  assert.equal(snapshot.sessionRefreshFailures, 1);
+  assert.equal(snapshot.futureProxyForwardingEligible, false);
+  assert.equal(
+    safeSessionRefreshErrorMessage('API_UNAVAILABLE'),
+    'Reconnecting to Jade Palace API. Device actions are temporarily locked.',
+  );
+});
+
+test('terminal session refresh failures clear session and refresh metadata', () => {
+  const refreshing = startSessionRefresh(createActiveHeartbeatState());
+  const mismatch = failSessionRefreshTerminal(refreshing, 'SIGNING_PAYLOAD_MISMATCH');
+  const disabled = failSessionRefreshTerminal(refreshing, 'DEVICE_DISABLED');
+
+  assert.equal(mismatch.status, 'RESET_REQUIRED');
+  assert.equal(mismatch.connectionStatus, 'LOCKED');
+  assert.equal(toRegistrationSnapshot(mismatch).sessionStatus, undefined);
+  assert.equal(toRegistrationSnapshot(mismatch).sessionExpiresAt, undefined);
+  assert.equal(toRegistrationSnapshot(mismatch).nextSessionRefreshAt, undefined);
+  assert.equal(toRegistrationSnapshot(mismatch).sessionRefreshInFlight, undefined);
+  assert.equal(mismatch.futureProxyForwardingEligible, false);
+  assert.equal(disabled.status, 'DISABLED');
+  assert.equal(disabled.serverStatus, 'DISABLED');
 });
 
 test('setup and local disable transitions do not retain heartbeat proxy eligibility', () => {

@@ -32,6 +32,7 @@ const sessionExpiresDetail = document.querySelector<HTMLElement>('#session-expir
 const activationCheckedDetail = document.querySelector<HTMLElement>('#activation-checked-detail');
 const lastHeartbeatDetail = document.querySelector<HTMLElement>('#last-heartbeat-detail');
 const nextHeartbeatDetail = document.querySelector<HTMLElement>('#next-heartbeat-detail');
+const nextRefreshDetail = document.querySelector<HTMLElement>('#next-refresh-detail');
 const heartbeatFailuresDetail = document.querySelector<HTMLElement>('#heartbeat-failures-detail');
 
 function setText(element: Element | null, value: string): void {
@@ -55,7 +56,7 @@ function render(next: ViewModel): void {
   setText(statusBadge, registration.status.replaceAll('_', ' '));
   setText(modeBadge, registration.mode.replaceAll('_', ' '));
   setText(message, registration.message);
-  setText(screenTitle, titleForStatus(registration.status));
+  setText(screenTitle, titleForRegistration(registration));
   setText(branchDetail, formatBranch(registration.branch));
   setText(hidDetail, registration.safeHidPrefix ?? 'Unavailable');
   setText(
@@ -71,6 +72,7 @@ function render(next: ViewModel): void {
   setText(activationCheckedDetail, formatDateTime(registration.lastActivationCheckAt));
   setText(lastHeartbeatDetail, formatDateTime(registration.lastHeartbeatAt));
   setText(nextHeartbeatDetail, formatDateTime(registration.nextHeartbeatAt));
+  setText(nextRefreshDetail, formatDateTime(registration.nextSessionRefreshAt));
   setText(heartbeatFailuresDetail, String(registration.heartbeatFailures ?? 0));
   setText(
     capabilityList,
@@ -123,6 +125,16 @@ function render(next: ViewModel): void {
   }
 }
 
+function titleForRegistration(registration: DeviceRegistrationSnapshot): string {
+  if (registration.connectionStatus === 'REFRESHING') {
+    return 'Refreshing Device Session';
+  }
+  if (registration.connectionStatus === 'RECONNECTING') {
+    return 'Reconnecting Device Session';
+  }
+  return titleForStatus(registration.status);
+}
+
 function titleForStatus(status: DeviceRegistrationSnapshot['status']): string {
   switch (status) {
     case 'UNREGISTERED':
@@ -169,6 +181,12 @@ function formatConnectionStatus(
   connectionStatus: DeviceRegistrationSnapshot['connectionStatus'],
   sessionStatus: string | undefined,
 ): string {
+  if (connectionStatus === 'REFRESHING') {
+    return 'Refreshing secure device session...';
+  }
+  if (connectionStatus === 'RECONNECTING') {
+    return 'Reconnecting to Jade Palace API...';
+  }
   if (connectionStatus && connectionStatus !== 'CONNECTED') {
     return connectionStatus.replaceAll('_', ' ');
   }

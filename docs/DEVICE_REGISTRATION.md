@@ -20,8 +20,8 @@ hardware.
 R3-B-D-C implements steps 4 through 7 in the desktop Agent with the real
 setup-code claim API. R3-B-D-D-B adds a manual Check Activation action for step
 10 after an admin activates the pending device. R3-B-D-D-C-B starts automatic
-heartbeats after successful session issue. Pending activation polling and
-automatic session refresh remain deferred.
+heartbeats after successful session issue. R3-B-D-D-C-C-B adds automatic secure
+session refresh before expiry. Pending activation polling remains deferred.
 
 After claim succeeds, the Agent displays Waiting for Admin Activation and tells
 operators to ask Main Admin or an authorized Admin to activate the device in
@@ -119,9 +119,9 @@ Session issue:
 
 The raw `sessionToken` is sensitive and returned once. Later phases must keep
 it out of renderer state, logs, persisted storage, and error objects. In this
-phase the main process keeps the token in memory only, uses it for heartbeats,
-and clears it on retry, failure, terminal heartbeat errors, local mock state
-changes, and app quit.
+phase the main process keeps the token in memory only, uses it for heartbeats
+and secure refresh, and clears it on activation retry, terminal heartbeat or
+refresh errors, local mock state changes, and app quit.
 
 Heartbeat:
 
@@ -133,6 +133,21 @@ Heartbeat:
 - API unavailable/rate-limited failures: reconnecting with backoff
 - disabled/denied/revoked/not-active/token-boundary failures: token cleared and
   device locked for reset/admin review
+
+Session refresh:
+
+- Uses existing `session/challenge` and `session` endpoints
+- Scheduled at `sessionExpiresAt - 60 seconds`
+- Near-expiry sessions refresh immediately
+- `connectionStatus` is `REFRESHING` while in flight
+- Heartbeat pauses/skips while refresh is in flight
+- Existing memory token is kept only until a validated replacement session
+  succeeds
+- Future proxy eligibility is false while `REFRESHING` or `RECONNECTING`
+- API unavailable/rate-limited failures retry refresh with 5s, 15s, 30s, then
+  60s backoff
+- disabled/denied/revoked/forbidden/unauthorized/malformed/signing mismatch
+  failures clear the token and lock the device
 
 ## API Enforcement Requirement
 
@@ -159,7 +174,6 @@ Attendance checkpoint APIs should require:
 This phase intentionally defers:
 
 - pending activation status polling
-- automatic active device session challenge/sign/issue refresh
 - JPPOS proxy integration
 - POS API enforcement
 - printer integration

@@ -78,6 +78,7 @@ export const AGENT_CONNECTION_STATUSES = [
   'DISCONNECTED',
   'CHECKING_ACTIVATION',
   'CONNECTED',
+  'REFRESHING',
   'RECONNECTING',
   'LOCKED',
   'ERROR',
@@ -257,6 +258,11 @@ export interface DeviceRegistrationSnapshot {
   nextHeartbeatAt?: string;
   heartbeatFailures?: number;
   lastHeartbeatErrorCode?: string;
+  lastSessionRefreshAt?: string;
+  nextSessionRefreshAt?: string;
+  sessionRefreshInFlight?: boolean;
+  sessionRefreshFailures?: number;
+  lastSessionRefreshErrorCode?: string;
   futureProxyForwardingEligible?: boolean;
   capabilities: DeviceCapability[];
   mode: AgentMode;

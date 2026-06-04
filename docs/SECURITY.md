@@ -7,14 +7,13 @@ requests that do not include valid approved device proof.
 
 ## Current Phase
 
-JPDEVAGENT-R3-B-D-D-C-B adds a heartbeat lifecycle manager on top of the real
-setup-code claim flow and manual Check Activation action. After a device
-session is issued, the main process sends heartbeats to Jade-Palace-API using
-the memory-only device session token.
+JPDEVAGENT-R3-B-D-D-C-C-B adds a session refresh lifecycle manager on top of
+the real setup-code claim flow, manual Check Activation action, and heartbeat
+lifecycle. After a device session is issued, the main process sends heartbeats
+to Jade-Palace-API using the memory-only device session token and schedules a
+secure refresh before expiry.
 
 - No automatic pending activation polling.
-- No automatic active device session challenge/sign/issue loop.
-- No automatic device session refresh loop.
 - No POS forwarding.
 - No printer bridge implementation.
 - No NFC hardware integration.
@@ -98,11 +97,30 @@ The client:
 
 The raw device session token is returned only from the session issue function.
 In this phase the main process stores the token in memory only and uses it only
-for the heartbeat endpoint after successful session issue. It is cleared before
-setup-code claim, before manual activation retries, after activation failures,
-after terminal heartbeat failures, on local mock disable/activation transitions,
-and on app quit. It is never persisted, logged, sent through preload, rendered,
-or exposed by the local proxy.
+for heartbeat and session refresh lifecycle work after successful session issue.
+It is cleared before setup-code claim, before manual activation retries, after
+activation failures, after terminal heartbeat or refresh failures, on local mock
+disable/activation transitions, and on app quit. It is never persisted, logged,
+sent through preload, rendered, or exposed by the local proxy.
+
+Session refresh uses the same challenge/sign/session issue flow as manual
+activation:
+
+- refresh is scheduled at `sessionExpiresAt - 60 seconds`
+- near-expiry sessions refresh immediately
+- `connectionStatus` becomes `REFRESHING` while refresh is in flight
+- heartbeat timers are paused while refresh is in flight
+- the old token remains in main memory during the refresh attempt but future
+  proxy-forwarding eligibility is false
+- the memory token is replaced only after a new session response is validated
+- API unavailable and rate-limited refresh failures enter `RECONNECTING` with
+  5s, 15s, 30s, then 60s backoff and keep proxy eligibility false
+- disabled, denied, revoked, forbidden, unauthorized, invalid-token,
+  missing-token, malformed, identity mismatch, and signing-payload mismatch
+  failures clear the memory-only token and lock the device
+
+A heartbeat `SESSION_EXPIRED` response may trigger exactly one refresh path when
+local device identity is intact. Other token/auth failures do not refresh.
 
 Heartbeat failures fail closed:
 
@@ -138,7 +156,7 @@ Current endpoints:
 
 `POST /proxy/test` is dev-only and does not forward to Jade-Palace-API.
 
-R3-B-D-D-C-B does not add proxy forwarding. Future forwarding remains gated on
+R3-B-D-D-C-C-B does not add proxy forwarding. Future forwarding remains gated on
 an active approved device session, a fresh successful heartbeat, and strict
 path/capability allowlists.
 

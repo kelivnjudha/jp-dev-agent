@@ -112,14 +112,66 @@ test('heartbeat handling stays main-process only and guarded against duplicate l
   assert.doesNotMatch(renderer, /sessionToken/);
 });
 
+test('session refresh stays main-process only and guarded against stale-token races', async () => {
+  const [main, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  assert.match(main, /SESSION_REFRESH_SAFETY_WINDOW_MS = 60_000/);
+  assert.match(main, /sessionRefreshInFlight/);
+  assert.match(main, /sessionRefreshLifecycleVersion/);
+  assert.match(main, /scheduleSessionRefreshTimer/);
+  assert.match(main, /pauseHeartbeatForSessionRefresh/);
+  assert.match(main, /validateBranchDeviceSessionChallengeSigningPayload/);
+  assert.match(main, /startSessionRefresh\(state\)/);
+  assert.doesNotMatch(preload, /runSessionRefresh/);
+  assert.doesNotMatch(preload, /sessionRefreshInFlight/);
+  assert.doesNotMatch(preload, /sessionToken/);
+  assert.doesNotMatch(renderer, /runSessionRefresh/);
+  assert.doesNotMatch(renderer, /sessionToken/);
+});
+
+test('session refresh replaces memory token only after a validated issue response', async () => {
+  const main = await readSource('apps/desktop-agent/src/main/main.ts');
+  const refreshStart = main.indexOf('async function runSessionRefresh');
+  const issueIndex = main.indexOf('const sessionIssue = await issueBranchDeviceSession', refreshStart);
+  const validateIndex = main.indexOf('assertValidSessionIssue(sessionIssue)', issueIndex);
+  const replaceIndex = main.indexOf('deviceSessionToken = sessionIssue.sessionToken', validateIndex);
+
+  assert.ok(refreshStart > -1);
+  assert.ok(issueIndex > refreshStart);
+  assert.ok(validateIndex > issueIndex);
+  assert.ok(replaceIndex > validateIndex);
+});
+
+test('heartbeat session expired triggers only the narrow refresh path', async () => {
+  const main = await readSource('apps/desktop-agent/src/main/main.ts');
+  const expiredCheckIndex = main.indexOf("errorCode === 'SESSION_EXPIRED'");
+  const identityGuardIndex = main.indexOf('canAttemptHeartbeatSessionExpiredRefresh', expiredCheckIndex);
+  const singleAttemptIndex = main.indexOf('sessionExpiredRefreshAttempted = true', identityGuardIndex);
+  const refreshIndex = main.indexOf("runSessionRefresh(refreshVersion, 'heartbeat_session_expired')", singleAttemptIndex);
+
+  assert.ok(expiredCheckIndex > -1);
+  assert.ok(identityGuardIndex > expiredCheckIndex);
+  assert.ok(singleAttemptIndex > identityGuardIndex);
+  assert.ok(refreshIndex > singleAttemptIndex);
+  assert.doesNotMatch(main, /SESSION_TOKEN_INVALID'[\s\S]{0,160}runSessionRefresh/);
+  assert.doesNotMatch(main, /SESSION_TOKEN_MISSING'[\s\S]{0,160}runSessionRefresh/);
+});
+
 test('heartbeat lifecycle stops clear token and timers on sensitive state changes', async () => {
   const main = await readSource('apps/desktop-agent/src/main/main.ts');
 
   assert.match(main, /function stopHeartbeatLifecycle/);
   assert.match(main, /clearHeartbeatTimer\(\)/);
+  assert.match(main, /clearSessionRefreshTimer\(\)/);
+  assert.match(main, /clearReconnectTimer\(\)/);
   assert.match(main, /clearDeviceSessionToken\(\)/);
   assert.match(main, /failHeartbeatTerminal\(state, 'SESSION_TOKEN_MISSING'\)/);
   assert.match(main, /failHeartbeatTerminal\(state, errorCode\)/);
+  assert.match(main, /failSessionRefreshTerminal\(state, errorCode\)/);
   assert.match(main, /ipcMain\.handle\('agent:claimSetupCode'[\s\S]*stopHeartbeatLifecycle\(\)/);
   assert.match(main, /ipcMain\.handle\('agent:disable'[\s\S]*stopHeartbeatLifecycle\(\)/);
 });

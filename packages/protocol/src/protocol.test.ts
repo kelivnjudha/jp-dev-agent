@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  AGENT_CONNECTION_STATUSES,
   BranchDeviceSessionChallengeValidationError,
   buildBranchDeviceSessionSigningPayload,
   validateBranchDeviceSessionChallengeSigningPayload,
@@ -29,6 +30,10 @@ test('device session signing payload is canonical and ordered', () => {
     }),
     'JP_BRANCH_DEVICE_SESSION_V1\nd0000000-0000-4000-8000-000000000001\nchallenge-value\n2026-06-04T01:00:00.000Z',
   );
+});
+
+test('agent connection statuses include refreshing without changing registration state enum', () => {
+  assert.ok(AGENT_CONNECTION_STATUSES.includes('REFRESHING'));
 });
 
 test('valid session challenge returns the exact server signing payload', () => {
