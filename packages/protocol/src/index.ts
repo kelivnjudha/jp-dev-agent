@@ -87,6 +87,70 @@ export const AGENT_CONNECTION_STATUSES = [
 export type AgentConnectionStatus =
   (typeof AGENT_CONNECTION_STATUSES)[number];
 
+export const SCAN_SOURCES = ['WEDGE', 'HID', 'SERIAL'] as const;
+
+export type ScanSource = (typeof SCAN_SOURCES)[number];
+
+export const SCAN_SYMBOLOGIES = [
+  'EAN13',
+  'EAN8',
+  'UPCA',
+  'UPCE',
+  'CODE128',
+  'QR',
+  'UNKNOWN',
+] as const;
+
+export type ScanSymbology = (typeof SCAN_SYMBOLOGIES)[number];
+
+export const SCAN_VALIDATION_ERROR_CODES = [
+  'SCAN_EMPTY',
+  'SCAN_TOO_LONG',
+  'SCAN_CONTROL_CHARS',
+  'SCAN_INVALID_CHARSET',
+  'SCAN_UNSUPPORTED_FORMAT',
+  'SCAN_EAN_CHECK_DIGIT_INVALID',
+  'SCAN_DUPLICATE',
+  'SCAN_RATE_LIMITED',
+] as const;
+
+export type ScanValidationErrorCode =
+  (typeof SCAN_VALIDATION_ERROR_CODES)[number];
+
+export interface ScanEvent {
+  type: 'SCAN';
+  scanId: string;
+  capturedAt: string;
+  source: ScanSource;
+  symbology: ScanSymbology;
+  valueLength: number;
+  valueHashPrefix: string;
+  value?: string;
+}
+
+export type ScanValidationResult =
+  | {
+      ok: true;
+      event: ScanEvent;
+    }
+  | {
+      ok: false;
+      code: ScanValidationErrorCode;
+      capturedAt: string;
+      source: ScanSource;
+      valueLength: number;
+      valueHashPrefix: string | null;
+    };
+
+export interface ScannerStatus {
+  enabled: boolean;
+  source: ScanSource;
+  lastScanAt: string | null;
+  lastOutcome: 'ACCEPTED' | ScanValidationErrorCode | null;
+  duplicateCount: number;
+  errorCount: number;
+}
+
 export interface BranchDeviceBranchSummary {
   id: string;
   code: string | null;

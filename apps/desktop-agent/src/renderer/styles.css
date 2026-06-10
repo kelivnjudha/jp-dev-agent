@@ -211,6 +211,10 @@ button:disabled {
   background: rgba(0, 0, 0, 0.18);
 }
 
+.scanner-card {
+  border-color: rgba(103, 231, 184, 0.26);
+}
+
 .small {
   font-size: 13px;
 }

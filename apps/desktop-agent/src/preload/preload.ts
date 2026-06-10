@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/protocol';
 import type { NfcReaderStatus } from '@jade-dev-agent/nfc-adapter';
 import type { PrinterStatus } from '@jade-dev-agent/printer-adapter';
+import type { ScanValidationResult, ScannerStatus } from '@jade-dev-agent/protocol';
 
 export interface AgentSnapshot {
   registration: DeviceRegistrationSnapshot;
@@ -15,6 +16,7 @@ export interface AgentSnapshot {
 export interface HardwareStatus {
   printer: PrinterStatus;
   nfc: NfcReaderStatus;
+  scanner: ScannerStatus;
 }
 
 const api = {
@@ -30,6 +32,8 @@ const api = {
   disable: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:disable'),
   getHardwareStatus: (): Promise<HardwareStatus> =>
     ipcRenderer.invoke('agent:getHardwareStatus'),
+  validateScannerInput: (input: string): Promise<ScanValidationResult> =>
+    ipcRenderer.invoke('agent:validateScannerInput', input),
 };
 
 contextBridge.exposeInMainWorld('jadeAgent', api);

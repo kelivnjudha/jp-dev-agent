@@ -135,7 +135,46 @@
             <span>Checkpoint mode</span>
             <span>Printer bridge</span>
             <span>NFC reader</span>
+            <span>Barcode scanner</span>
           </div>
+        </article>
+
+        <article class="card scanner-card">
+          <p class="section-label">Scanner validation harness</p>
+          <h2>Keyboard-wedge test</h2>
+          <p>
+            Focus this field and scan a product code. Phase 1 validates locally
+            only; scans are not sent to POS, API, or the local proxy.
+          </p>
+          <label for="scanner-capture">Scanner capture field</label>
+          <div class="input-row">
+            <input
+              id="scanner-capture"
+              autocomplete="off"
+              aria-describedby="scanner-help"
+              placeholder="Focus here, then scan"
+              spellcheck="false"
+            />
+            <button id="scanner-validate" class="secondary">Validate</button>
+          </div>
+          <p id="scanner-help" class="small">
+            Wedge input is untrusted and cannot prove scanner source. Values
+            are redacted by default; metadata only is shown below.
+          </p>
+          <dl class="detail-list compact">
+            <div>
+              <dt>Outcome</dt>
+              <dd id="scanner-outcome">Waiting for scan</dd>
+            </div>
+            <div>
+              <dt>Last scan</dt>
+              <dd id="scanner-meta">No accepted scan yet.</dd>
+            </div>
+            <div>
+              <dt>Counters</dt>
+              <dd id="scanner-counts">Duplicates 0 · Errors 0</dd>
+            </div>
+          </dl>
         </article>
 
         <article class="card">

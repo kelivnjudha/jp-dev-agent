@@ -17,12 +17,13 @@ test('renderer clears setup code before sending claim request', async () => {
   assert.ok(clearIndex < claimIndex, 'setup input clears before IPC claim');
 });
 
-test('preload exposes only safe setup and status bridge functions', async () => {
+test('preload exposes only safe setup status and scanner bridge functions', async () => {
   const preload = await readSource('apps/desktop-agent/src/preload/preload.ts');
 
   assert.match(preload, /getAgentStatus/);
   assert.match(preload, /claimSetupCode/);
   assert.match(preload, /checkActivation/);
+  assert.match(preload, /validateScannerInput/);
   assert.doesNotMatch(preload, /submitSetupCode/);
   assert.doesNotMatch(preload, /privateKeyPem/);
   assert.doesNotMatch(preload, /publicKeyPem/);
@@ -182,4 +183,33 @@ test('local proxy remains non-forwarding during heartbeat phase', async () => {
   assert.doesNotMatch(proxy, /fetch\(/);
   assert.doesNotMatch(proxy, /sessionToken/);
   assert.match(proxy, /DEV_ONLY_NO_UPSTREAM_FORWARDING/);
+});
+
+test('scanner bridge is narrow and does not expose device secrets', async () => {
+  const [main, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+  const scannerBridgeIndex = preload.indexOf('validateScannerInput');
+  const scannerMainIndex = main.indexOf("ipcMain.handle('agent:validateScannerInput'");
+
+  assert.ok(scannerBridgeIndex > -1);
+  assert.ok(scannerMainIndex > -1);
+  assert.match(main, /scannerAdapter\.validateInput\(input\)/);
+  assert.doesNotMatch(preload.slice(scannerBridgeIndex), /privateKeyPem|publicKeyPem|hardwareFingerprintHash|sessionToken/);
+  assert.doesNotMatch(renderer, /innerHTML/);
+  assert.doesNotMatch(renderer, /window\.open|location\.href|eval\(/);
+});
+
+test('device status proxy does not expose scanner capture material', async () => {
+  const proxy = await readSource('packages/agent-proxy/src/index.ts');
+  const statusPathIndex = proxy.indexOf("path === '/device/status'");
+  const statusBodyIndex = proxy.indexOf('options.getDeviceStatus()', statusPathIndex);
+
+  assert.ok(statusPathIndex > -1);
+  assert.ok(statusBodyIndex > statusPathIndex);
+  assert.doesNotMatch(proxy, /validateScannerInput/);
+  assert.doesNotMatch(proxy, /valueHashPrefix/);
+  assert.doesNotMatch(proxy, /ScanEvent/);
 });

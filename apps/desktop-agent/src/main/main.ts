@@ -55,6 +55,7 @@ import {
 } from '@jade-dev-agent/device-storage';
 import { PlaceholderNfcReaderAdapter } from '@jade-dev-agent/nfc-adapter';
 import { PlaceholderPrinterAdapter } from '@jade-dev-agent/printer-adapter';
+import { WedgeScannerHarnessAdapter } from '@jade-dev-agent/scanner-adapter';
 import type {
   AgentHealth,
   BranchDeviceSessionIssueResponse,
@@ -107,6 +108,16 @@ let malformedExpiryRecoveryAttempted = false;
 
 const printerAdapter = new PlaceholderPrinterAdapter();
 const nfcAdapter = new PlaceholderNfcReaderAdapter();
+const scannerAdapter = new WedgeScannerHarnessAdapter({
+  includeValue:
+    process.env.NODE_ENV !== 'production'
+    && process.env.JDA_SCANNER_DEV_SHOW_VALUE === 'true',
+  safeLog: (event) => {
+    if (process.env.NODE_ENV === 'production') return;
+    // Safe metadata only: no raw barcode, secrets, setup codes, or payload bodies.
+    console.info('[scanner]', event);
+  },
+});
 
 function getHealth(): AgentHealth {
   const unhealthyStatuses = new Set([
@@ -959,7 +970,11 @@ ipcMain.handle('agent:disable', () => {
 ipcMain.handle('agent:getHardwareStatus', async () => ({
   printer: await printerAdapter.getStatus(),
   nfc: await nfcAdapter.getStatus(),
+  scanner: await scannerAdapter.getStatus(),
 }));
+
+ipcMain.handle('agent:validateScannerInput', async (_event, input: unknown) =>
+  scannerAdapter.validateInput(input));
 
 app.whenReady().then(() => {
   void bootstrap();

@@ -1,4 +1,5 @@
 import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/protocol';
+import type { ScanValidationResult } from '@jade-dev-agent/protocol';
 import type { AgentSnapshot, HardwareStatus } from '../preload/preload.js';
 
 interface ViewModel {
@@ -15,6 +16,8 @@ const checkActivationButton = document.querySelector<HTMLButtonElement>('#check-
 const activateButton = document.querySelector<HTMLButtonElement>('#mock-activate');
 const disableButton = document.querySelector<HTMLButtonElement>('#disable-device');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh');
+const scannerInput = document.querySelector<HTMLInputElement>('#scanner-capture');
+const scannerValidateButton = document.querySelector<HTMLButtonElement>('#scanner-validate');
 const devControls = document.querySelector<HTMLElement>('#dev-controls');
 const statusBadge = document.querySelector<HTMLElement>('#status-badge');
 const modeBadge = document.querySelector<HTMLElement>('#mode-badge');
@@ -22,6 +25,9 @@ const message = document.querySelector<HTMLElement>('#message');
 const capabilityList = document.querySelector<HTMLElement>('#capabilities');
 const proxyStatus = document.querySelector<HTMLElement>('#proxy-status');
 const hardwareStatus = document.querySelector<HTMLElement>('#hardware-status');
+const scannerOutcome = document.querySelector<HTMLElement>('#scanner-outcome');
+const scannerMeta = document.querySelector<HTMLElement>('#scanner-meta');
+const scannerCounts = document.querySelector<HTMLElement>('#scanner-counts');
 const screenTitle = document.querySelector<HTMLElement>('#screen-title');
 const branchDetail = document.querySelector<HTMLElement>('#branch-detail');
 const hidDetail = document.querySelector<HTMLElement>('#hid-detail');
@@ -89,9 +95,10 @@ function render(next: ViewModel): void {
   setText(
     hardwareStatus,
     hardware
-      ? `Printer: ${hardware.printer.message} · NFC: ${hardware.nfc.message}`
+      ? `Printer: ${hardware.printer.message} · NFC: ${hardware.nfc.message} · Scanner: ${formatScannerStatus(hardware)}`
       : 'Hardware adapter status unavailable.',
   );
+  renderScannerCounters(hardware);
 
   if (devControls) {
     devControls.hidden = !next.controls.mockFlowEnabled;
@@ -195,12 +202,67 @@ function formatConnectionStatus(
   return connectionStatus.replaceAll('_', ' ');
 }
 
+function formatScannerStatus(hardware: HardwareStatus): string {
+  const status = hardware.scanner;
+  const lastOutcome = status.lastOutcome ? status.lastOutcome.replaceAll('_', ' ') : 'waiting';
+  return `${status.enabled ? 'enabled' : 'disabled'} ${status.source} harness, ${lastOutcome}`;
+}
+
+function renderScannerCounters(hardware: HardwareStatus | null): void {
+  if (!hardware) {
+    setText(scannerCounts, 'Duplicates 0 · Errors 0');
+    return;
+  }
+  setText(
+    scannerCounts,
+    `Duplicates ${hardware.scanner.duplicateCount} · Errors ${hardware.scanner.errorCount}`,
+  );
+}
+
+function renderScanResult(result: ScanValidationResult): void {
+  if (result.ok) {
+    const maybeValue = result.event.value ? ` · Dev value ${result.event.value}` : '';
+    setText(scannerOutcome, 'Accepted');
+    setText(
+      scannerMeta,
+      `${result.event.symbology} · ${result.event.valueLength} chars · hash ${result.event.valueHashPrefix} · ${formatDateTime(result.event.capturedAt)}${maybeValue}`,
+    );
+    return;
+  }
+
+  setText(scannerOutcome, result.code.replaceAll('_', ' '));
+  setText(
+    scannerMeta,
+    `Rejected · ${result.valueLength} chars · hash ${result.valueHashPrefix ?? 'none'} · ${formatDateTime(result.capturedAt)}`,
+  );
+}
+
 async function refresh(): Promise<void> {
   const [snapshot, hardware] = await Promise.all([
     window.jadeAgent.getAgentStatus(),
     window.jadeAgent.getHardwareStatus(),
   ]);
   render({ ...snapshot, hardware });
+}
+
+async function validateScannerCapture(): Promise<void> {
+  const capturedText = scannerInput?.value ?? '';
+  if (scannerInput) {
+    scannerInput.value = '';
+    scannerInput.focus();
+  }
+  if (scannerValidateButton) scannerValidateButton.disabled = true;
+  try {
+    const result = await window.jadeAgent.validateScannerInput(capturedText);
+    renderScanResult(result);
+    const hardware = await window.jadeAgent.getHardwareStatus();
+    renderScannerCounters(hardware);
+  } catch {
+    setText(scannerOutcome, 'Scanner validation failed');
+    setText(scannerMeta, 'Harness could not validate this capture.');
+  } finally {
+    if (scannerValidateButton) scannerValidateButton.disabled = false;
+  }
 }
 
 submitButton?.addEventListener('click', () => {
@@ -262,6 +324,16 @@ disableButton?.addEventListener('click', () => {
 
 refreshButton?.addEventListener('click', () => {
   void refresh();
+});
+
+scannerValidateButton?.addEventListener('click', () => {
+  void validateScannerCapture();
+});
+
+scannerInput?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== 'Tab') return;
+  event.preventDefault();
+  void validateScannerCapture();
 });
 
 void refresh();

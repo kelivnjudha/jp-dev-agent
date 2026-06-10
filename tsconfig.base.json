@@ -24,7 +24,8 @@
       "@jade-dev-agent/device-identity": ["packages/device-identity/src/index.ts"],
       "@jade-dev-agent/device-storage": ["packages/device-storage/src/index.ts"],
       "@jade-dev-agent/printer-adapter": ["packages/hardware-adapters/printer/src/index.ts"],
-      "@jade-dev-agent/nfc-adapter": ["packages/hardware-adapters/nfc/src/index.ts"]
+      "@jade-dev-agent/nfc-adapter": ["packages/hardware-adapters/nfc/src/index.ts"],
+      "@jade-dev-agent/scanner-adapter": ["packages/hardware-adapters/scanner/src/index.ts"]
     }
   }
 }

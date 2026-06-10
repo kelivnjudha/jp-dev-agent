@@ -18,6 +18,7 @@
     "@jade-dev-agent/device-storage": "0.1.0",
     "@jade-dev-agent/nfc-adapter": "0.1.0",
     "@jade-dev-agent/printer-adapter": "0.1.0",
-    "@jade-dev-agent/protocol": "0.1.0"
+    "@jade-dev-agent/protocol": "0.1.0",
+    "@jade-dev-agent/scanner-adapter": "0.1.0"
   }
 }

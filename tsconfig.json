@@ -9,6 +9,7 @@
     { "path": "./packages/agent-proxy" },
     { "path": "./packages/hardware-adapters/printer" },
     { "path": "./packages/hardware-adapters/nfc" },
+    { "path": "./packages/hardware-adapters/scanner" },
     { "path": "./apps/desktop-agent" }
   ]
 }

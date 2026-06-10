@@ -4,6 +4,9 @@ import test from 'node:test';
 import {
   AGENT_CONNECTION_STATUSES,
   BranchDeviceSessionChallengeValidationError,
+  SCAN_SOURCES,
+  SCAN_SYMBOLOGIES,
+  SCAN_VALIDATION_ERROR_CODES,
   buildBranchDeviceSessionSigningPayload,
   validateBranchDeviceSessionChallengeSigningPayload,
 } from './index.js';
@@ -34,6 +37,14 @@ test('device session signing payload is canonical and ordered', () => {
 
 test('agent connection statuses include refreshing without changing registration state enum', () => {
   assert.ok(AGENT_CONNECTION_STATUSES.includes('REFRESHING'));
+});
+
+test('scanner protocol DTOs include wedge source and safe validation codes', () => {
+  assert.ok(SCAN_SOURCES.includes('WEDGE'));
+  assert.ok(SCAN_SYMBOLOGIES.includes('EAN13'));
+  assert.ok(SCAN_SYMBOLOGIES.includes('CODE128'));
+  assert.ok(SCAN_VALIDATION_ERROR_CODES.includes('SCAN_DUPLICATE'));
+  assert.ok(SCAN_VALIDATION_ERROR_CODES.includes('SCAN_RATE_LIMITED'));
 });
 
 test('valid session challenge returns the exact server signing payload', () => {
