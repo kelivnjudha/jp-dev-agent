@@ -1,5 +1,16 @@
+// Jade Palace Device Console — renderer presentation layer.
+//
+// Presentation only: all device/session/scanner behavior lives in the
+// main process behind the minimal preload bridge. This file renders
+// safe snapshot fields with textContent (never HTML), shows scan
+// results as safe metadata (raw values hidden by default; the dev-only
+// value appears only when the main process includes it behind
+// JDA_SCANNER_DEV_SHOW_VALUE and is visually labeled DEV ONLY), and
+// keeps a client-side safe event timeline — no secrets, no raw
+// barcode values, no console logging of scan content.
+
 import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/protocol';
-import type { ScanValidationResult } from '@jade-dev-agent/protocol';
+import type { ScanValidationErrorCode, ScanValidationResult } from '@jade-dev-agent/protocol';
 import type { AgentSnapshot, HardwareStatus } from '../preload/preload.js';
 
 interface ViewModel {
@@ -28,6 +39,11 @@ const hardwareStatus = document.querySelector<HTMLElement>('#hardware-status');
 const scannerOutcome = document.querySelector<HTMLElement>('#scanner-outcome');
 const scannerMeta = document.querySelector<HTMLElement>('#scanner-meta');
 const scannerCounts = document.querySelector<HTMLElement>('#scanner-counts');
+const scannerErrorHelp = document.querySelector<HTMLElement>('#scanner-error-help');
+const scannerDevValue = document.querySelector<HTMLElement>('#scanner-dev-value');
+const scannerDevValueText = document.querySelector<HTMLElement>('#scanner-dev-value-text');
+const eventTimeline = document.querySelector<HTMLUListElement>('#event-timeline');
+const timelineEmpty = document.querySelector<HTMLElement>('#timeline-empty');
 const screenTitle = document.querySelector<HTMLElement>('#screen-title');
 const branchDetail = document.querySelector<HTMLElement>('#branch-detail');
 const hidDetail = document.querySelector<HTMLElement>('#hid-detail');
@@ -41,9 +57,113 @@ const nextHeartbeatDetail = document.querySelector<HTMLElement>('#next-heartbeat
 const nextRefreshDetail = document.querySelector<HTMLElement>('#next-refresh-detail');
 const heartbeatFailuresDetail = document.querySelector<HTMLElement>('#heartbeat-failures-detail');
 
+// Helpful, text-based copy for every scanner rejection code. Raw scan
+// content never appears here — only what the operator should do next.
+const SCAN_ERROR_COPY: Record<ScanValidationErrorCode, string> = {
+  SCAN_EMPTY: 'Empty capture. Focus the capture field, then scan again.',
+  SCAN_TOO_LONG:
+    'Too long. The capture exceeds the maximum accepted barcode length — check the scanner is not concatenating scans.',
+  SCAN_CONTROL_CHARS:
+    'Control characters detected. The scanner is likely configured with an extra prefix/suffix — review its terminator settings.',
+  SCAN_INVALID_CHARSET:
+    'Invalid characters. The capture contains characters outside the accepted set; the code may not be a supported product barcode.',
+  SCAN_UNSUPPORTED_FORMAT:
+    'Unsupported format. This symbology is not in the accepted list for this device mode.',
+  SCAN_EAN_CHECK_DIGIT_INVALID:
+    'Bad check digit. The EAN/UPC checksum failed — rescan; if it persists, the printed code may be damaged.',
+  SCAN_DUPLICATE:
+    'Duplicate scan. The same code was just accepted — wait a moment and rescan if this is intentional.',
+  SCAN_RATE_LIMITED:
+    'Rate limited. Scans are arriving too fast — pause briefly, then continue.',
+};
+
+type BadgeTone = 'trusted' | 'ok' | 'warn' | 'danger' | 'neutral';
+
+function statusTone(status: DeviceRegistrationSnapshot['status']): BadgeTone {
+  switch (status) {
+    case 'ACTIVE':
+      return 'trusted';
+    case 'PENDING_ACTIVATION':
+    case 'SETUP_CODE_SUBMITTING':
+    case 'ACTIVE_SESSION_CONNECTING':
+    case 'SESSION_EXPIRED_RETRYING':
+      return 'warn';
+    case 'DISABLED':
+    case 'DENIED':
+    case 'REVOKED':
+    case 'ERROR':
+    case 'RESET_REQUIRED':
+      return 'danger';
+    default:
+      return 'neutral';
+  }
+}
+
 function setText(element: Element | null, value: string): void {
   if (element) element.textContent = value;
 }
+
+function setBadge(element: HTMLElement | null, label: string, tone: BadgeTone): void {
+  if (!element) return;
+  element.textContent = label;
+  if (tone === 'neutral') {
+    delete element.dataset.tone;
+  } else {
+    element.dataset.tone = tone;
+  }
+}
+
+// ---------- Safe event timeline (client-side, capped, metadata only) ----------
+
+const TIMELINE_MAX_ENTRIES = 50;
+
+function pushTimelineEvent(
+  kind: string,
+  tone: 'ok' | 'danger' | 'info',
+  text: string,
+): void {
+  if (!eventTimeline) return;
+  if (timelineEmpty) timelineEmpty.hidden = true;
+
+  const item = document.createElement('li');
+  item.dataset.tone = tone;
+
+  const time = document.createElement('span');
+  time.className = 't-time';
+  time.textContent = new Date().toLocaleTimeString();
+
+  const kindEl = document.createElement('span');
+  kindEl.className = 't-kind';
+  kindEl.textContent = kind;
+
+  const textEl = document.createElement('span');
+  textEl.className = 't-text';
+  textEl.textContent = text;
+
+  item.append(time, kindEl, textEl);
+  eventTimeline.prepend(item);
+
+  while (eventTimeline.children.length > TIMELINE_MAX_ENTRIES) {
+    eventTimeline.lastElementChild?.remove();
+  }
+}
+
+let lastTimelineStatusKey = '';
+
+function recordStatusTransition(registration: DeviceRegistrationSnapshot): void {
+  const key = `${registration.status}|${registration.connectionStatus ?? ''}`;
+  if (key === lastTimelineStatusKey) return;
+  const isFirst = lastTimelineStatusKey === '';
+  lastTimelineStatusKey = key;
+  if (isFirst) return; // Don't log the initial render as a transition.
+  const tone = statusTone(registration.status) === 'danger' ? 'danger' : 'info';
+  const connection = registration.connectionStatus
+    ? ` · ${registration.connectionStatus.replaceAll('_', ' ')}`
+    : '';
+  pushTimelineEvent('STATUS', tone, `${registration.status.replaceAll('_', ' ')}${connection}`);
+}
+
+// ---------- Rendering ----------
 
 function isSetupLockedStatus(status: DeviceRegistrationSnapshot['status']): boolean {
   return [
@@ -59,8 +179,12 @@ function isSetupLockedStatus(status: DeviceRegistrationSnapshot['status']): bool
 function render(next: ViewModel): void {
   const { registration, health, hardware } = next;
   document.body.dataset.status = registration.status;
-  setText(statusBadge, registration.status.replaceAll('_', ' '));
-  setText(modeBadge, registration.mode.replaceAll('_', ' '));
+  setBadge(
+    statusBadge,
+    registration.status.replaceAll('_', ' '),
+    statusTone(registration.status),
+  );
+  setBadge(modeBadge, registration.mode.replaceAll('_', ' '), 'neutral');
   setText(message, registration.message);
   setText(screenTitle, titleForRegistration(registration));
   setText(branchDetail, formatBranch(registration.branch));
@@ -84,21 +208,22 @@ function render(next: ViewModel): void {
     capabilityList,
     registration.capabilities.length
       ? registration.capabilities.join(' · ')
-      : 'No active capabilities yet.',
+      : 'None yet',
   );
   setText(
     proxyStatus,
     health.proxy.enabled
-      ? `Local proxy online at ${health.proxy.host}:${health.proxy.port}`
-      : 'Local proxy offline.',
+      ? `Online at ${health.proxy.host}:${health.proxy.port}`
+      : 'Offline',
   );
   setText(
     hardwareStatus,
     hardware
       ? `Printer: ${hardware.printer.message} · NFC: ${hardware.nfc.message} · Scanner: ${formatScannerStatus(hardware)}`
-      : 'Hardware adapter status unavailable.',
+      : 'Status unavailable',
   );
   renderScannerCounters(hardware);
+  recordStatusTransition(registration);
 
   if (devControls) {
     devControls.hidden = !next.controls.mockFlowEnabled;
@@ -167,12 +292,12 @@ function titleForStatus(status: DeviceRegistrationSnapshot['status']): string {
     case 'RESET_REQUIRED':
       return 'Device Reset Required';
     default:
-      return 'Jade Device Agent';
+      return 'Jade Palace Device Agent';
   }
 }
 
 function formatBranch(branch: DeviceRegistrationSnapshot['branch']): string {
-  if (!branch) return 'Not claimed yet.';
+  if (!branch) return 'Not claimed';
   const code = branch.code ? ` (${branch.code})` : '';
   return `${branch.name || 'Assigned branch'}${code}`;
 }
@@ -221,20 +346,49 @@ function renderScannerCounters(hardware: HardwareStatus | null): void {
 
 function renderScanResult(result: ScanValidationResult): void {
   if (result.ok) {
-    const maybeValue = result.event.value ? ` · Dev value ${result.event.value}` : '';
+    if (scannerOutcome) scannerOutcome.dataset.tone = 'ok';
     setText(scannerOutcome, 'Accepted');
     setText(
       scannerMeta,
-      `${result.event.symbology} · ${result.event.valueLength} chars · hash ${result.event.valueHashPrefix} · ${formatDateTime(result.event.capturedAt)}${maybeValue}`,
+      `${result.event.symbology} · ${result.event.valueLength} chars · hash ${result.event.valueHashPrefix} · ${formatDateTime(result.event.capturedAt)}`,
+    );
+    if (scannerErrorHelp) scannerErrorHelp.hidden = true;
+    // Dev-only raw value: present ONLY when the main process includes
+    // it behind JDA_SCANNER_DEV_SHOW_VALUE (never in production). It is
+    // rendered as text in a clearly-labeled DEV ONLY box.
+    if (scannerDevValue && scannerDevValueText) {
+      if (result.event.value) {
+        scannerDevValueText.textContent = result.event.value;
+        scannerDevValue.hidden = false;
+      } else {
+        scannerDevValueText.textContent = '';
+        scannerDevValue.hidden = true;
+      }
+    }
+    pushTimelineEvent(
+      'SCAN OK',
+      'ok',
+      `${result.event.symbology} · ${result.event.valueLength} chars · hash ${result.event.valueHashPrefix}`,
     );
     return;
   }
 
+  if (scannerOutcome) scannerOutcome.dataset.tone = 'danger';
   setText(scannerOutcome, result.code.replaceAll('_', ' '));
   setText(
     scannerMeta,
     `Rejected · ${result.valueLength} chars · hash ${result.valueHashPrefix ?? 'none'} · ${formatDateTime(result.capturedAt)}`,
   );
+  if (scannerErrorHelp) {
+    scannerErrorHelp.textContent =
+      SCAN_ERROR_COPY[result.code] ?? 'Scan rejected. Review the scanner configuration and retry.';
+    scannerErrorHelp.hidden = false;
+  }
+  if (scannerDevValue && scannerDevValueText) {
+    scannerDevValueText.textContent = '';
+    scannerDevValue.hidden = true;
+  }
+  pushTimelineEvent('SCAN ERR', 'danger', `${result.code.replaceAll('_', ' ')} · ${result.valueLength} chars`);
 }
 
 async function refresh(): Promise<void> {
@@ -258,8 +412,10 @@ async function validateScannerCapture(): Promise<void> {
     const hardware = await window.jadeAgent.getHardwareStatus();
     renderScannerCounters(hardware);
   } catch {
+    if (scannerOutcome) scannerOutcome.dataset.tone = 'danger';
     setText(scannerOutcome, 'Scanner validation failed');
     setText(scannerMeta, 'Harness could not validate this capture.');
+    if (scannerErrorHelp) scannerErrorHelp.hidden = true;
   } finally {
     if (scannerValidateButton) scannerValidateButton.disabled = false;
   }
@@ -285,6 +441,7 @@ submitButton?.addEventListener('click', () => {
         submitButton.textContent = 'Claim Device';
       }
       setText(message, 'Device claim failed. Try again or ask an admin for a new setup code.');
+      pushTimelineEvent('CLAIM', 'danger', 'Device claim failed');
     });
 });
 
@@ -305,6 +462,7 @@ checkActivationButton?.addEventListener('click', () => {
         checkActivationButton.textContent = 'Check Activation';
       }
       setText(message, 'Activation check failed. Device remains locked.');
+      pushTimelineEvent('ACTIVATE', 'danger', 'Activation check failed — device remains locked');
     });
 });
 

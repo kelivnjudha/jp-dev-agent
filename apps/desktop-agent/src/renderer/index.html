@@ -7,193 +7,232 @@
       content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Jade Device Agent</title>
+    <title>Jade Palace Device Agent</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="shell">
-      <section class="hero">
-        <div>
-          <p class="eyebrow">JADE PALACE SECURE DEVICE</p>
+      <!-- TOP STATUS BAR -->
+      <header class="topbar">
+        <div class="brand">
+          <p class="brand-mark">Jade Palace · Device Console</p>
           <h1 id="screen-title">Loading Agent</h1>
-          <p id="message" class="message">Preparing local device agent.</p>
         </div>
-        <div class="badge-stack">
+        <div class="topbar-chips">
+          <span class="chip">
+            <span class="chip-key">Branch</span>
+            <span id="branch-detail" class="chip-value">Not claimed</span>
+          </span>
+          <span class="chip">
+            <span class="chip-key">Device</span>
+            <span id="hid-detail" class="chip-value">Unavailable</span>
+          </span>
+          <span id="mode-badge" class="badge">SETUP</span>
           <span id="status-badge" class="badge">LOADING</span>
-          <span id="mode-badge" class="badge muted">SETUP</span>
+        </div>
+      </header>
+
+      <section class="console">
+        <!-- LEFT — DEVICE TRUST -->
+        <div class="column">
+          <article class="panel">
+            <p class="panel-label">Device trust</p>
+            <h2>Registration &amp; activation</h2>
+            <p id="message" class="message">Preparing local device agent.</p>
+
+            <label for="device-label">Device label <span class="optional">(optional)</span></label>
+            <input
+              id="device-label"
+              autocomplete="off"
+              maxlength="80"
+              placeholder="Front counter workstation"
+              spellcheck="false"
+            />
+            <label for="setup-code">Setup code</label>
+            <div class="input-row">
+              <input
+                id="setup-code"
+                autocomplete="off"
+                aria-describedby="setup-help"
+                placeholder="JPBD-XXXXXX-XXXXXX-XXXXXX"
+                spellcheck="false"
+              />
+              <button id="submit-code">Claim Device</button>
+            </div>
+            <p id="setup-help" class="small">
+              The one-time setup code from JP Admin is sent once to Jade Palace
+              API and never saved on this device. The device stays locked until
+              an authorized admin activates it in Branch Devices.
+            </p>
+            <div class="activation-actions">
+              <button id="check-activation" class="secondary" hidden>Check Activation</button>
+            </div>
+            <div id="dev-controls" class="dev-controls" hidden>
+              <button id="mock-activate" class="secondary">Mock activate</button>
+              <button id="disable-device" class="danger">Disable locally</button>
+            </div>
+
+            <hr />
+            <dl class="detail-list">
+              <div>
+                <dt>Server status</dt>
+                <dd id="server-status-detail">Waiting for setup code</dd>
+              </div>
+              <div>
+                <dt>Claimed</dt>
+                <dd id="claimed-at-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Capabilities</dt>
+                <dd id="capabilities">None yet</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="panel">
+            <p class="panel-label">Session lifecycle</p>
+            <h2>Secure session &amp; heartbeat</h2>
+            <dl class="detail-list">
+              <div>
+                <dt>Session</dt>
+                <dd id="session-status-detail">Not connected</dd>
+              </div>
+              <div>
+                <dt>Expires</dt>
+                <dd id="session-expires-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Last check</dt>
+                <dd id="activation-checked-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Last heartbeat</dt>
+                <dd id="last-heartbeat-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Next heartbeat</dt>
+                <dd id="next-heartbeat-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Next refresh</dt>
+                <dd id="next-refresh-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Heartbeat failures</dt>
+                <dd id="heartbeat-failures-detail">0</dd>
+              </div>
+            </dl>
+            <p class="small">
+              Heartbeat and secure session refresh run automatically after
+              activation. Failures fail closed and lock the device.
+            </p>
+          </article>
+
+          <article class="panel">
+            <p class="panel-label">Local services</p>
+            <h2>Proxy &amp; hardware</h2>
+            <dl class="detail-list">
+              <div>
+                <dt>Local proxy</dt>
+                <dd id="proxy-status">Checking…</dd>
+              </div>
+              <div>
+                <dt>Adapters</dt>
+                <dd id="hardware-status">Status unavailable</dd>
+              </div>
+            </dl>
+            <p class="small">
+              The proxy binds to 127.0.0.1 only and does not forward POS or
+              API requests in this phase.
+            </p>
+          </article>
+        </div>
+
+        <!-- RIGHT — SCANNER CAPTURE LAB -->
+        <div class="column">
+          <article class="panel lab">
+            <p class="panel-label">Hardware bench</p>
+            <h2>Scanner Capture Lab <span class="lab-tag">LOCAL ONLY</span></h2>
+            <p>
+              Focus the capture field and scan a product code. Phase 1
+              validates locally only — scans are not sent to POS, API, or the
+              local proxy.
+            </p>
+            <label for="scanner-capture">Scanner capture field</label>
+            <div class="input-row">
+              <input
+                id="scanner-capture"
+                autocomplete="off"
+                aria-describedby="scanner-help"
+                placeholder="Focus here, then scan"
+                spellcheck="false"
+              />
+              <button id="scanner-validate" class="secondary">Validate</button>
+            </div>
+            <p id="scanner-help" class="small">
+              Barcode content is treated as untrusted input. Raw values are
+              hidden by default — only safe metadata is shown. Wedge input
+              cannot prove it came from a scanner.
+            </p>
+
+            <hr />
+            <dl class="detail-list">
+              <div>
+                <dt>Outcome</dt>
+                <dd id="scanner-outcome">Waiting for scan</dd>
+              </div>
+              <div>
+                <dt>Last scan</dt>
+                <dd id="scanner-meta">No scan captured yet.</dd>
+              </div>
+              <div>
+                <dt>Counters</dt>
+                <dd id="scanner-counts">Duplicates 0 · Errors 0</dd>
+              </div>
+            </dl>
+            <p id="scanner-error-help" class="scan-error-help" role="alert" hidden></p>
+            <p id="scanner-dev-value" class="dev-value" hidden>
+              <span class="dev-tag">DEV ONLY</span><span id="scanner-dev-value-text"></span>
+            </p>
+          </article>
+
+          <article class="panel">
+            <p class="panel-label">Capability matrix</p>
+            <h2>Device functions</h2>
+            <p class="small">
+              Capabilities are assigned by the server when the device is
+              approved — this agent never chooses its own.
+            </p>
+            <div class="cap-row">
+              <span>POS mode</span>
+              <span>Checkpoint mode</span>
+              <span>Printer bridge</span>
+              <span>NFC reader</span>
+              <span>Barcode scanner</span>
+            </div>
+          </article>
         </div>
       </section>
 
-      <section class="grid">
-        <article class="card setup-card">
-          <p class="section-label">Setup-code-first registration</p>
-          <h2>Claim this device</h2>
-          <p>
-            Enter the one-time setup code generated in JP Admin. This device
-            will stay locked until Main Admin or an authorized Admin activates
-            it in Branch Devices.
-          </p>
-          <label for="device-label">Device label <span class="optional">(optional)</span></label>
-          <input
-            id="device-label"
-            autocomplete="off"
-            maxlength="80"
-            placeholder="Front counter workstation"
-            spellcheck="false"
-          />
-          <label for="setup-code">Setup code</label>
-          <div class="input-row">
-            <input
-              id="setup-code"
-              autocomplete="off"
-              aria-describedby="setup-help"
-              placeholder="JPBD-XXXXXX-XXXXXX-XXXXXX"
-              spellcheck="false"
-            />
-            <button id="submit-code">Claim Device</button>
+      <!-- BOTTOM — SAFE EVENT TIMELINE -->
+      <section class="timeline-panel">
+        <div class="timeline-head">
+          <div>
+            <p class="panel-label">Diagnostics</p>
+            <h2>Event timeline</h2>
           </div>
-          <p id="setup-help" class="small">
-            The setup code is sent once to Jade Palace API and is not saved on this device.
-          </p>
-          <div id="dev-controls" class="dev-controls" hidden>
-            <button id="mock-activate" class="secondary">Mock activate</button>
-            <button id="disable-device" class="danger">Disable locally</button>
-          </div>
-        </article>
-
-        <article class="card">
-          <p class="section-label">Pending activation</p>
-          <h2>Admin approval</h2>
-          <dl id="pending-details" class="detail-list">
-            <div>
-              <dt>Branch</dt>
-              <dd id="branch-detail">Not claimed yet.</dd>
-            </div>
-            <div>
-              <dt>Safe HID</dt>
-              <dd id="hid-detail">Unavailable</dd>
-            </div>
-            <div>
-              <dt>Status</dt>
-              <dd id="server-status-detail">Waiting for setup code</dd>
-            </div>
-            <div>
-              <dt>Claimed</dt>
-              <dd id="claimed-at-detail">Not yet</dd>
-            </div>
-          </dl>
-          <p class="small">
-            Ask Main Admin or an authorized Admin to activate this device in
-            JP Admin -> Branch -> Devices.
-          </p>
-          <div class="activation-actions">
-            <button id="check-activation" class="secondary" hidden>Check Activation</button>
-          </div>
-          <p class="small">
-            After admin activation, use Check Activation to request a signed
-            device session. This version does not poll automatically.
-          </p>
-          <hr />
-          <dl class="detail-list compact">
-            <div>
-              <dt>Session</dt>
-              <dd id="session-status-detail">Not connected</dd>
-            </div>
-            <div>
-              <dt>Expires</dt>
-              <dd id="session-expires-detail">Not yet</dd>
-            </div>
-            <div>
-              <dt>Last check</dt>
-              <dd id="activation-checked-detail">Not yet</dd>
-            </div>
-            <div>
-              <dt>Last heartbeat</dt>
-              <dd id="last-heartbeat-detail">Not yet</dd>
-            </div>
-            <div>
-              <dt>Next heartbeat</dt>
-              <dd id="next-heartbeat-detail">Not yet</dd>
-            </div>
-            <div>
-              <dt>Next refresh</dt>
-              <dd id="next-refresh-detail">Not yet</dd>
-            </div>
-            <div>
-              <dt>Heartbeat failures</dt>
-              <dd id="heartbeat-failures-detail">0</dd>
-            </div>
-          </dl>
-        </article>
-
-        <article class="card">
-          <p class="section-label">Capabilities</p>
-          <h2>Device functions</h2>
-          <p id="capabilities">No active capabilities yet.</p>
-          <div class="cap-grid">
-            <span>POS mode</span>
-            <span>Checkpoint mode</span>
-            <span>Printer bridge</span>
-            <span>NFC reader</span>
-            <span>Barcode scanner</span>
-          </div>
-        </article>
-
-        <article class="card scanner-card">
-          <p class="section-label">Scanner validation harness</p>
-          <h2>Keyboard-wedge test</h2>
-          <p>
-            Focus this field and scan a product code. Phase 1 validates locally
-            only; scans are not sent to POS, API, or the local proxy.
-          </p>
-          <label for="scanner-capture">Scanner capture field</label>
-          <div class="input-row">
-            <input
-              id="scanner-capture"
-              autocomplete="off"
-              aria-describedby="scanner-help"
-              placeholder="Focus here, then scan"
-              spellcheck="false"
-            />
-            <button id="scanner-validate" class="secondary">Validate</button>
-          </div>
-          <p id="scanner-help" class="small">
-            Wedge input is untrusted and cannot prove scanner source. Values
-            are redacted by default; metadata only is shown below.
-          </p>
-          <dl class="detail-list compact">
-            <div>
-              <dt>Outcome</dt>
-              <dd id="scanner-outcome">Waiting for scan</dd>
-            </div>
-            <div>
-              <dt>Last scan</dt>
-              <dd id="scanner-meta">No accepted scan yet.</dd>
-            </div>
-            <div>
-              <dt>Counters</dt>
-              <dd id="scanner-counts">Duplicates 0 · Errors 0</dd>
-            </div>
-          </dl>
-        </article>
-
-        <article class="card">
-          <p class="section-label">Local Agent Proxy</p>
-          <h2>Proxy status</h2>
-          <p id="proxy-status">Checking local proxy...</p>
-          <p class="small">
-            The proxy binds to 127.0.0.1 only and does not forward POS or API
-            requests in this phase.
-          </p>
-          <hr />
-          <h2>Hardware placeholders</h2>
-          <p id="hardware-status">Hardware adapter status unavailable.</p>
-        </article>
+          <button id="refresh" class="ghost">Refresh status</button>
+        </div>
+        <p id="timeline-empty" class="timeline-empty">
+          No events yet. Status changes and scan outcomes appear here as safe
+          metadata — never secrets or raw barcode values.
+        </p>
+        <ul id="event-timeline" class="timeline" aria-label="Safe event timeline"></ul>
       </section>
 
       <footer>
-        <button id="refresh" class="ghost">Refresh status</button>
-        <span>Heartbeat and secure session refresh are automatic after activation. Activation polling comes in a later phase.</span>
+        <span>Jade Palace Device Agent · local hardware console</span>
+        <span>Activation polling arrives in a later phase.</span>
       </footer>
     </main>
     <script type="module" src="./renderer.js"></script>
