@@ -860,6 +860,142 @@ export function toRegistrationSnapshot(
   return snapshot;
 }
 
+// ─── POS device-proof readiness (Phase 2C fast unlock) ────────────
+//
+// Pure classifier for the local POS proof endpoint. It splits "not
+// ready" into TRANSIENT warm-up states (the device will become ready on
+// its own — and a heartbeat can be woken early to accelerate it) vs
+// TERMINAL states (revoked/denied/disabled/unactivated/capability
+// missing — never auto-retried, the gate stays locked).
+//
+// Why transient warm-up exists at all: `completeSessionRefresh` (and
+// fresh activation) deliberately leave `futureProxyForwardingEligible`
+// false — only a CONFIRMED heartbeat flips it true and stamps
+// `lastHeartbeatAt`. The first heartbeat after a session issue is
+// scheduled a full interval out, so without a wake-up the proof
+// endpoint refuses for up to that interval even though the device is
+// fully trusted. `wakeHeartbeat: true` marks exactly the states a
+// single immediate heartbeat resolves.
+
+export type PosDeviceProofReadinessCode =
+  | 'POS_DEVICE_PROOF_WARMING'
+  | 'POS_DEVICE_HEARTBEAT_STALE'
+  | 'POS_DEVICE_REFRESH_IN_FLIGHT'
+  | 'POS_DEVICE_NOT_CONNECTED'
+  | 'POS_DEVICE_NOT_ACTIVE'
+  | 'POS_DEVICE_CAPABILITY_MISSING'
+  | 'POS_DEVICE_PROOF_EXPIRED'
+  | 'POS_DEVICE_PROOF_INVALID';
+
+export type PosDeviceProofReadiness =
+  | { ready: true }
+  | {
+      ready: false;
+      code: PosDeviceProofReadinessCode;
+      /** True when the agent is expected to become ready on its own
+       *  shortly (warm-up); callers may wait briefly and re-check.
+       *  False is terminal for this request — never auto-retried. */
+      transient: boolean;
+      /** True when one immediate heartbeat resolves the blocker. */
+      wakeHeartbeat: boolean;
+    };
+
+export interface PosDeviceProofReadinessInput {
+  state: AgentState;
+  hasSessionToken: boolean;
+  sessionRefreshInFlight: boolean;
+  nowMs: number;
+  heartbeatFreshnessMs: number;
+  maxHeartbeatClockSkewMs?: number;
+}
+
+const notReadyForPosProof = (
+  code: PosDeviceProofReadinessCode,
+  transient: boolean,
+  wakeHeartbeat: boolean,
+): PosDeviceProofReadiness => ({ ready: false, code, transient, wakeHeartbeat });
+
+export function evaluatePosDeviceProofReadiness({
+  state,
+  hasSessionToken,
+  sessionRefreshInFlight,
+  nowMs,
+  heartbeatFreshnessMs,
+  maxHeartbeatClockSkewMs = 120_000,
+}: PosDeviceProofReadinessInput): PosDeviceProofReadiness {
+  // No device session token in memory — either never activated or the
+  // lifecycle cleared it on a terminal failure. Never auto-wake.
+  if (!hasSessionToken) {
+    return notReadyForPosProof('POS_DEVICE_NOT_ACTIVE', false, false);
+  }
+  // Startup / recovery states with an own retry lifecycle — the proof
+  // caller may briefly wait, but must not inject extra heartbeats while
+  // session establishment is converging.
+  if (
+    state.status === 'ACTIVE_SESSION_CONNECTING'
+    || state.status === 'SESSION_EXPIRED_RETRYING'
+  ) {
+    return notReadyForPosProof('POS_DEVICE_NOT_CONNECTED', true, false);
+  }
+  // Anything else that is not ACTIVE on both the agent and the server
+  // is terminal for proof purposes (revoked / denied / disabled /
+  // pending activation / error / reset required).
+  if (state.status !== 'ACTIVE' || state.serverStatus !== 'ACTIVE') {
+    return notReadyForPosProof('POS_DEVICE_NOT_ACTIVE', false, false);
+  }
+  if (!state.capabilities.includes('POS_TERMINAL')) {
+    return notReadyForPosProof('POS_DEVICE_CAPABILITY_MISSING', false, false);
+  }
+  if (!state.deviceId || !state.branch?.id) {
+    return notReadyForPosProof('POS_DEVICE_PROOF_INVALID', false, false);
+  }
+  if (sessionRefreshInFlight || state.connectionStatus === 'REFRESHING') {
+    return notReadyForPosProof('POS_DEVICE_REFRESH_IN_FLIGHT', true, false);
+  }
+  if (state.connectionStatus !== 'CONNECTED') {
+    return notReadyForPosProof('POS_DEVICE_NOT_CONNECTED', true, false);
+  }
+  const sessionExpiresAtMs = state.sessionExpiresAt
+    ? new Date(state.sessionExpiresAt).getTime()
+    : Number.NaN;
+  if (!Number.isFinite(sessionExpiresAtMs) || sessionExpiresAtMs <= nowMs) {
+    return notReadyForPosProof('POS_DEVICE_PROOF_EXPIRED', false, false);
+  }
+  // Post-refresh / post-activation warm-up: trust is established but a
+  // confirmed heartbeat has not yet re-armed proof eligibility.
+  if (state.futureProxyForwardingEligible !== true) {
+    return notReadyForPosProof('POS_DEVICE_PROOF_WARMING', true, true);
+  }
+  const lastHeartbeatMs = state.lastHeartbeatAt
+    ? new Date(state.lastHeartbeatAt).getTime()
+    : Number.NaN;
+  if (
+    !Number.isFinite(lastHeartbeatMs)
+    || nowMs - lastHeartbeatMs > heartbeatFreshnessMs
+    || lastHeartbeatMs - nowMs > maxHeartbeatClockSkewMs
+  ) {
+    return notReadyForPosProof('POS_DEVICE_HEARTBEAT_STALE', true, true);
+  }
+  return { ready: true };
+}
+
+/** Share one in-flight execution of an async task across concurrent
+ *  callers. While a run is pending every caller gets the same promise;
+ *  after it settles the next call starts a fresh run. Used so many
+ *  simultaneous POS proof requests trigger at most ONE readiness
+ *  heartbeat wake-up. */
+export function createSingleFlight<T>(task: () => Promise<T>): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  return () => {
+    if (!inFlight) {
+      inFlight = task().finally(() => {
+        inFlight = null;
+      });
+    }
+    return inFlight;
+  };
+}
+
 function modeForCapabilities(capabilities: DeviceCapability[]): AgentMode {
   if (capabilities.includes('SHOP_CHECKPOINT')) return 'CHECKPOINT';
   if (capabilities.includes('PRINTER_BRIDGE')) return 'PRINTER_BRIDGE';

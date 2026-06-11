@@ -17,7 +17,9 @@ import {
   createInitialAgentState,
   createInitialAgentStateFromPending,
   createPendingActivationState,
+  createSingleFlight,
   disableDevice,
+  evaluatePosDeviceProofReadiness,
   failActivationCheck,
   failHeartbeatTerminal,
   failHeartbeatTransient,
@@ -88,6 +90,11 @@ const ACTIVATION_POLL_INITIAL_DELAY_MS = 5_000;
 const ACTIVATION_POLL_INTERVAL_MS = 12_000;
 const ACTIVATION_POLL_API_RETRY_DELAYS_MS = [15_000, 30_000, 60_000] as const;
 const POS_PROOF_HEARTBEAT_FRESHNESS_MS = 5 * 60_000;
+// Fast-readiness budget for a single /pos/device-proof request: stay
+// under JPPOS's 2.5s proof-fetch timeout so a warm-up that resolves
+// in-band still returns 200 on the SAME request instead of a 423.
+const POS_PROOF_READY_WAIT_MS = 1_800;
+const POS_PROOF_READY_POLL_MS = 120;
 const POS_PROOF_BINDING_RE = /^[A-Za-z0-9_-]{32,128}$/u;
 const DEFAULT_JPPOS_ORIGIN = 'http://127.0.0.1:3002';
 
@@ -863,46 +870,70 @@ function resolveJpposAllowedOrigin(): string | null {
   }
 }
 
-function assertFreshPosProofHeartbeat(nowMs: number): void {
-  const lastHeartbeatMs = state.lastHeartbeatAt
-    ? new Date(state.lastHeartbeatAt).getTime()
-    : Number.NaN;
-  if (
-    !Number.isFinite(lastHeartbeatMs)
-    || nowMs - lastHeartbeatMs > POS_PROOF_HEARTBEAT_FRESHNESS_MS
-    || lastHeartbeatMs - nowMs > 120_000
-  ) {
-    throw new PosDeviceProofReadinessError('POS_DEVICE_HEARTBEAT_STALE');
+const sleepMs = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+// One immediate heartbeat to resolve a transient proof warm-up (stale
+// lastHeartbeatAt or post-refresh eligibility). Shared across however
+// many concurrent /pos/device-proof requests arrive, so JPPOS retry
+// bursts trigger at most ONE extra heartbeat. Runs the heartbeat the
+// lifecycle already scheduled — runHeartbeat re-schedules the next
+// interval itself, so the normal cadence is untouched (no busy loop,
+// no duplicate concurrent refresh).
+const wakeHeartbeatForPosProof = createSingleFlight(async () => {
+  try {
+    if (heartbeatInFlight || sessionRefreshInFlight) return;
+    if (!deviceSessionToken || state.status !== 'ACTIVE') return;
+    clearHeartbeatTimer();
+    await runHeartbeat(heartbeatLifecycleVersion || 1);
+  } catch {
+    // runHeartbeat handles its own failures (transient retry / terminal
+    // stop); the proof request just re-evaluates readiness afterwards.
   }
+});
+
+function evaluatePosProofReadinessNow() {
+  return evaluatePosDeviceProofReadiness({
+    state,
+    hasSessionToken: deviceSessionToken !== null,
+    sessionRefreshInFlight,
+    nowMs: Date.now(),
+    heartbeatFreshnessMs: POS_PROOF_HEARTBEAT_FRESHNESS_MS,
+  });
+}
+
+// Bounded transient-warm-up wait: wake the heartbeat when that is what
+// the readiness blocker needs, then poll readiness until the budget
+// runs out. Terminal reasons (revoked / denied / disabled / capability
+// missing / no session) return immediately and are NEVER retried here.
+async function awaitPosProofReadiness() {
+  let readiness = evaluatePosProofReadinessNow();
+  if (readiness.ready || !readiness.transient) return readiness;
+  const deadlineMs = Date.now() + POS_PROOF_READY_WAIT_MS;
+  while (Date.now() < deadlineMs) {
+    if (readiness.wakeHeartbeat) {
+      void wakeHeartbeatForPosProof();
+    }
+    await sleepMs(POS_PROOF_READY_POLL_MS);
+    readiness = evaluatePosProofReadinessNow();
+    if (readiness.ready || !readiness.transient) return readiness;
+  }
+  return readiness;
 }
 
 async function issueLocalPosDeviceProof(binding: string) {
   if (!POS_PROOF_BINDING_RE.test(binding)) {
     throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_INVALID');
   }
-  if (
-    !deviceSessionToken
-    || state.status !== 'ACTIVE'
-    || state.serverStatus !== 'ACTIVE'
-    || state.connectionStatus !== 'CONNECTED'
-    || state.futureProxyForwardingEligible !== true
-    || sessionRefreshInFlight
-  ) {
-    throw new PosDeviceProofReadinessError('POS_DEVICE_NOT_ACTIVE');
+  const readiness = await awaitPosProofReadiness();
+  if (!readiness.ready) {
+    throw new PosDeviceProofReadinessError(readiness.code);
   }
   if (!state.deviceId || !state.branch?.id) {
     throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_INVALID');
   }
-  if (!state.capabilities.includes('POS_TERMINAL')) {
-    throw new PosDeviceProofReadinessError('POS_DEVICE_CAPABILITY_MISSING');
-  }
-
-  const nowMs = Date.now();
-  const sessionExpiresAtMs = parseSessionExpiresAtMs(state.sessionExpiresAt);
-  if (sessionExpiresAtMs === null || sessionExpiresAtMs <= nowMs) {
-    throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_EXPIRED');
-  }
-  assertFreshPosProofHeartbeat(nowMs);
 
   const [identity, pendingDevice] = await Promise.all([
     Promise.resolve(storage?.readIdentity()).then((record) => record ?? null),

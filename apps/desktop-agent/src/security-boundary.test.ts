@@ -242,20 +242,60 @@ test('local proxy remains non-forwarding during heartbeat phase', async () => {
 });
 
 test('POS proof signing stays main-process only and uses exact local origin allowlist', async () => {
-  const [main, proxy, preload, renderer] = await Promise.all([
+  const [main, core, proxy, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('packages/agent-core/src/index.ts'),
     readSource('packages/agent-proxy/src/index.ts'),
     readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
 
   assert.match(main, /createPosDeviceProofAssertion/);
-  assert.match(main, /futureProxyForwardingEligible !== true/);
+  assert.match(main, /evaluatePosDeviceProofReadiness/);
+  assert.match(core, /futureProxyForwardingEligible !== true/);
   assert.match(main, /JDA_POS_ALLOWED_ORIGIN/);
   assert.match(proxy, /access-control-allow-origin/);
   assert.doesNotMatch(proxy, /access-control-allow-origin': '\*'/);
   assert.doesNotMatch(preload, /createPosDeviceProofAssertion|JDA_POS_ALLOWED_ORIGIN|deviceSessionToken/);
   assert.doesNotMatch(renderer, /createPosDeviceProofAssertion|deviceSessionToken|privateKeyPem/);
+});
+
+test('POS proof fast readiness wake-up is bounded, single-flight, and main-process only', async () => {
+  const [main, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  // Bounded wait below JPPOS's 2.5s proof-fetch timeout, paced polling
+  // (no busy loop), and a shared single-flight heartbeat wake so retry
+  // bursts cannot stack refreshes.
+  assert.match(main, /POS_PROOF_READY_WAIT_MS = 1_800/);
+  assert.match(main, /POS_PROOF_READY_POLL_MS = 120/);
+  assert.match(main, /createSingleFlight\(/);
+  assert.match(main, /wakeHeartbeatForPosProof/);
+  assert.match(main, /await sleepMs\(POS_PROOF_READY_POLL_MS\)/);
+
+  // The wake re-runs the lifecycle's own heartbeat (which reschedules
+  // itself) — it must be guarded against concurrent refresh/heartbeat.
+  const wakeIndex = main.indexOf('const wakeHeartbeatForPosProof = createSingleFlight');
+  const guardIndex = main.indexOf('if (heartbeatInFlight || sessionRefreshInFlight) return;', wakeIndex);
+  const runIndex = main.indexOf('await runHeartbeat(heartbeatLifecycleVersion || 1);', guardIndex);
+  assert.ok(wakeIndex > -1);
+  assert.ok(guardIndex > wakeIndex);
+  assert.ok(runIndex > guardIndex);
+
+  // Terminal readiness reasons must never enter the wait loop.
+  const awaitIndex = main.indexOf('async function awaitPosProofReadiness');
+  const terminalShortCircuit = main.indexOf(
+    'if (readiness.ready || !readiness.transient) return readiness;',
+    awaitIndex,
+  );
+  assert.ok(awaitIndex > -1);
+  assert.ok(terminalShortCircuit > awaitIndex);
+
+  assert.doesNotMatch(preload, /wakeHeartbeatForPosProof|awaitPosProofReadiness|runHeartbeat/);
+  assert.doesNotMatch(renderer, /wakeHeartbeatForPosProof|awaitPosProofReadiness|runHeartbeat/);
 });
 
 test('scanner bridge is narrow and does not expose device secrets', async () => {
