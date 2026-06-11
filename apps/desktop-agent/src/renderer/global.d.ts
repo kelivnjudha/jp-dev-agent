@@ -1,4 +1,4 @@
-import type { JadeAgentBridge } from '../preload/preload.js';
+import type { JadeAgentBridge } from '../preload/preload.cjs';
 
 declare global {
   interface Window {

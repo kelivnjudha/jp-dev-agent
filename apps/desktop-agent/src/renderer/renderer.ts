@@ -11,7 +11,7 @@
 
 import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/protocol';
 import type { ScanValidationErrorCode, ScanValidationResult } from '@jade-dev-agent/protocol';
-import type { AgentSnapshot, HardwareStatus } from '../preload/preload.js';
+import type { AgentSnapshot, HardwareStatus } from '../preload/preload.cjs';
 
 interface ViewModel {
   registration: DeviceRegistrationSnapshot;
@@ -392,9 +392,14 @@ function renderScanResult(result: ScanValidationResult): void {
 }
 
 async function refresh(): Promise<void> {
+  const bridge = bridgeOrNull();
+  if (!bridge) {
+    setText(screenTitle, 'Agent Bridge Unavailable');
+    return;
+  }
   const [snapshot, hardware] = await Promise.all([
-    window.jadeAgent.getAgentStatus(),
-    window.jadeAgent.getHardwareStatus(),
+    bridge.getAgentStatus(),
+    bridge.getHardwareStatus(),
   ]);
   render({ ...snapshot, hardware });
 }
@@ -421,7 +426,30 @@ async function validateScannerCapture(): Promise<void> {
   }
 }
 
+// If the preload bridge failed to load (window.jadeAgent missing), a
+// bare property access would throw synchronously AFTER the button is
+// set to 'Claiming...' — escaping the listener and freezing the UI.
+// Guard it, surface the failure visibly, and reset the button.
+function resetClaimButton(): void {
+  if (submitButton) {
+    submitButton.disabled = false;
+    submitButton.textContent = 'Claim Device';
+  }
+}
+
+function bridgeOrNull(): Window['jadeAgent'] | null {
+  const bridge = (window as Partial<Window>).jadeAgent;
+  if (!bridge) {
+    console.error('[claim-trace] BRIDGE_MISSING window.jadeAgent is not available');
+    setText(message, 'Agent bridge unavailable. Close and relaunch the Device Agent.');
+    pushTimelineEvent('BRIDGE', 'danger', 'Preload bridge missing — relaunch the agent');
+    return null;
+  }
+  return bridge;
+}
+
 submitButton?.addEventListener('click', () => {
+  console.info('[claim-trace] CLAIM_CLICKED');
   const code = setupInput?.value ?? '';
   const label = deviceLabelInput?.value || undefined;
   if (setupInput) setupInput.value = '';
@@ -429,17 +457,20 @@ submitButton?.addEventListener('click', () => {
     submitButton.disabled = true;
     submitButton.textContent = 'Claiming...';
   }
-  void window.jadeAgent
+  const bridge = bridgeOrNull();
+  if (!bridge) {
+    resetClaimButton();
+    return;
+  }
+  console.info('[claim-trace] IPC_SENT');
+  void bridge
     .claimSetupCode(code, label)
     .then(async (snapshot) => {
-      const hardware = await window.jadeAgent.getHardwareStatus();
+      const hardware = await bridge.getHardwareStatus();
       render({ ...snapshot, hardware });
     })
     .catch(() => {
-      if (submitButton) {
-        submitButton.disabled = false;
-        submitButton.textContent = 'Claim Device';
-      }
+      resetClaimButton();
       setText(message, 'Device claim failed. Try again or ask an admin for a new setup code.');
       pushTimelineEvent('CLAIM', 'danger', 'Device claim failed');
     });

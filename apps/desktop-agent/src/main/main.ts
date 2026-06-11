@@ -770,12 +770,31 @@ function createWindow(): void {
     title: 'Jade Device Agent',
     backgroundColor: '#061B16',
     webPreferences: {
-      preload: join(__dirname, '../preload/preload.js'),
+      // Sandboxed preloads must be CommonJS — the source is preload.cts
+      // so tsc (NodeNext) emits preload.cjs. An ESM preload.js here
+      // fails to load under sandbox:true, which silently removes the
+      // window.jadeAgent bridge.
+      preload: join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
+
+  // A failed preload silently removes the window.jadeAgent bridge and
+  // freezes the UI — surface it loudly. Error message only; never
+  // secrets.
+  mainWindow.webContents.on('preload-error', (_event, _preloadPath, error) => {
+    console.error(`[claim-trace] PRELOAD_ERROR ${error.message}`);
+  });
+
+  const baseUrlForLog = resolveApiBaseUrl();
+  if (baseUrlForLog) {
+    const parsed = new URL(baseUrlForLog);
+    console.info(`[claim-trace] API_BASE ${parsed.protocol}//${parsed.host}`);
+  } else {
+    console.error('[claim-trace] API_BASE invalid or unset');
+  }
 
   void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 }
@@ -811,6 +830,9 @@ async function bootstrap(): Promise<void> {
 ipcMain.handle('agent:getSnapshot', () => getSnapshot());
 
 ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, deviceLabel: unknown) => {
+  // Safe claim trace — event markers only; never the setup code, keys,
+  // fingerprints, or request/response bodies.
+  console.info('[claim-trace] IPC_RECEIVED');
   stopHeartbeatLifecycle();
   const rawSetupCode = typeof setupCode === 'string' ? setupCode.trim() : '';
   if (!rawSetupCode) {
@@ -828,6 +850,9 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
     const identity = await ensureLocalIdentity();
     const safeDeviceLabel = safeOptionalString(deviceLabel, 80);
     const localIp = resolveLocalIpForClaim();
+    console.info(
+      `[claim-trace] CLAIM_API_CALL_START target=${new URL(apiBaseUrl).protocol}//${new URL(apiBaseUrl).host}`,
+    );
     const claim = await claimBranchDeviceSetupCode(
       {
         apiBaseUrl,
@@ -858,8 +883,11 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
       pendingDevice,
       'Waiting for Admin Activation. Ask Main Admin or an authorized Admin to activate this device in JP Admin.',
     );
+    console.info('[claim-trace] CLAIM_API_CALL_DONE status=PENDING_ACTIVATION');
   } catch (error) {
-    state = failSetupCodeClaim(state, mapClaimFailure(error));
+    const failureCode = mapClaimFailure(error);
+    console.info(`[claim-trace] CLAIM_API_CALL_ERROR code=${failureCode}`);
+    state = failSetupCodeClaim(state, failureCode);
   }
   return getSnapshot();
 });

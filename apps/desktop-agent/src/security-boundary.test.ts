@@ -18,7 +18,7 @@ test('renderer clears setup code before sending claim request', async () => {
 });
 
 test('preload exposes only safe setup status and scanner bridge functions', async () => {
-  const preload = await readSource('apps/desktop-agent/src/preload/preload.ts');
+  const preload = await readSource('apps/desktop-agent/src/preload/preload.cts');
 
   assert.match(preload, /getAgentStatus/);
   assert.match(preload, /claimSetupCode/);
@@ -64,7 +64,7 @@ test('mock activation controls are hidden by default and gated in main process',
 test('real setup-code claim is main-process only', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
-    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
 
@@ -76,7 +76,7 @@ test('real setup-code claim is main-process only', async () => {
 test('session challenge, signing, and token handling stay main-process only', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
-    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
 
@@ -98,7 +98,7 @@ test('session challenge, signing, and token handling stay main-process only', as
 test('heartbeat handling stays main-process only and guarded against duplicate loops', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
-    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
 
@@ -116,7 +116,7 @@ test('heartbeat handling stays main-process only and guarded against duplicate l
 test('session refresh stays main-process only and guarded against stale-token races', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
-    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
 
@@ -188,7 +188,7 @@ test('local proxy remains non-forwarding during heartbeat phase', async () => {
 test('scanner bridge is narrow and does not expose device secrets', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),
-    readSource('apps/desktop-agent/src/preload/preload.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
   ]);
   const scannerBridgeIndex = preload.indexOf('validateScannerInput');

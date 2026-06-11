@@ -17,5 +17,5 @@
     { "path": "../../packages/hardware-adapters/nfc" },
     { "path": "../../packages/hardware-adapters/scanner" }
   ],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.cts"]
 }
