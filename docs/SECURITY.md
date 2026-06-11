@@ -152,9 +152,17 @@ Current endpoints:
 
 - `GET /health`
 - `GET /device/status`
+- `GET /pos/device-proof?binding=...`
 - `POST /proxy/test`
 
 `POST /proxy/test` is dev-only and does not forward to Jade-Palace-API.
+
+`GET /pos/device-proof` is not generic proxy forwarding. It returns only a
+short-lived signed `{ proof, expiresAt }` envelope for an exact
+`JDA_POS_ALLOWED_ORIGIN` match, is rate limited, and requires an active device
+session, `POS_TERMINAL` capability, fresh heartbeat, and fresh local session.
+It never returns session tokens, private keys, public keys, fingerprints, setup
+codes, request bodies, or response bodies.
 
 R3-B-D-D-C-C-B does not add proxy forwarding. Future forwarding remains gated on
 an active approved device session, a fresh successful heartbeat, and strict

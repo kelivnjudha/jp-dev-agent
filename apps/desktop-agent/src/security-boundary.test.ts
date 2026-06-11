@@ -241,6 +241,23 @@ test('local proxy remains non-forwarding during heartbeat phase', async () => {
   assert.match(proxy, /DEV_ONLY_NO_UPSTREAM_FORWARDING/);
 });
 
+test('POS proof signing stays main-process only and uses exact local origin allowlist', async () => {
+  const [main, proxy, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('packages/agent-proxy/src/index.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  assert.match(main, /createPosDeviceProofAssertion/);
+  assert.match(main, /futureProxyForwardingEligible !== true/);
+  assert.match(main, /JDA_POS_ALLOWED_ORIGIN/);
+  assert.match(proxy, /access-control-allow-origin/);
+  assert.doesNotMatch(proxy, /access-control-allow-origin': '\*'/);
+  assert.doesNotMatch(preload, /createPosDeviceProofAssertion|JDA_POS_ALLOWED_ORIGIN|deviceSessionToken/);
+  assert.doesNotMatch(renderer, /createPosDeviceProofAssertion|deviceSessionToken|privateKeyPem/);
+});
+
 test('scanner bridge is narrow and does not expose device secrets', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),

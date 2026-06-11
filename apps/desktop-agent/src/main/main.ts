@@ -45,6 +45,7 @@ import {
 } from '@jade-dev-agent/agent-proxy';
 import {
   computeHardwareFingerprintHash,
+  createPosDeviceProofAssertion,
   createSafeDeviceIdentity,
   createSafeHidPrefix,
   signDeviceSessionPayload,
@@ -86,6 +87,9 @@ const SESSION_REFRESH_SAFETY_WINDOW_MS = 60_000;
 const ACTIVATION_POLL_INITIAL_DELAY_MS = 5_000;
 const ACTIVATION_POLL_INTERVAL_MS = 12_000;
 const ACTIVATION_POLL_API_RETRY_DELAYS_MS = [15_000, 30_000, 60_000] as const;
+const POS_PROOF_HEARTBEAT_FRESHNESS_MS = 5 * 60_000;
+const POS_PROOF_BINDING_RE = /^[A-Za-z0-9_-]{32,128}$/u;
+const DEFAULT_JPPOS_ORIGIN = 'http://127.0.0.1:3002';
 
 type SessionRefreshReason =
   | 'scheduled'
@@ -773,6 +777,13 @@ class SessionRefreshLifecycleError extends Error {
   }
 }
 
+class PosDeviceProofReadinessError extends Error {
+  constructor(code: string) {
+    super(code);
+    this.name = 'PosDeviceProofReadinessError';
+  }
+}
+
 function heartbeatFailureCodeForDeviceStatus(
   status: BranchDeviceStatusValue,
 ): HeartbeatFailureErrorCode {
@@ -836,6 +847,78 @@ function resolveApiBaseUrl(): string | null {
   } catch {
     return null;
   }
+}
+
+function resolveJpposAllowedOrigin(): string | null {
+  const rawValue = (process.env.JDA_POS_ALLOWED_ORIGIN || DEFAULT_JPPOS_ORIGIN).trim();
+  try {
+    const parsed = new URL(rawValue);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function assertFreshPosProofHeartbeat(nowMs: number): void {
+  const lastHeartbeatMs = state.lastHeartbeatAt
+    ? new Date(state.lastHeartbeatAt).getTime()
+    : Number.NaN;
+  if (
+    !Number.isFinite(lastHeartbeatMs)
+    || nowMs - lastHeartbeatMs > POS_PROOF_HEARTBEAT_FRESHNESS_MS
+    || lastHeartbeatMs - nowMs > 120_000
+  ) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_HEARTBEAT_STALE');
+  }
+}
+
+async function issueLocalPosDeviceProof(binding: string) {
+  if (!POS_PROOF_BINDING_RE.test(binding)) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_INVALID');
+  }
+  if (
+    !deviceSessionToken
+    || state.status !== 'ACTIVE'
+    || state.serverStatus !== 'ACTIVE'
+    || state.connectionStatus !== 'CONNECTED'
+    || state.futureProxyForwardingEligible !== true
+    || sessionRefreshInFlight
+  ) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_NOT_ACTIVE');
+  }
+  if (!state.deviceId || !state.branch?.id) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_INVALID');
+  }
+  if (!state.capabilities.includes('POS_TERMINAL')) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_CAPABILITY_MISSING');
+  }
+
+  const nowMs = Date.now();
+  const sessionExpiresAtMs = parseSessionExpiresAtMs(state.sessionExpiresAt);
+  if (sessionExpiresAtMs === null || sessionExpiresAtMs <= nowMs) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_EXPIRED');
+  }
+  assertFreshPosProofHeartbeat(nowMs);
+
+  const [identity, pendingDevice] = await Promise.all([
+    Promise.resolve(storage?.readIdentity()).then((record) => record ?? null),
+    Promise.resolve(storage?.readPendingDevice()).then((record) => record ?? null),
+  ]);
+  if (!identity || pendingDevice?.deviceId !== state.deviceId) {
+    throw new PosDeviceProofReadinessError('POS_DEVICE_PROOF_INVALID');
+  }
+
+  return createPosDeviceProofAssertion({
+    privateKeyPem: identity.privateKeyPem,
+    deviceId: state.deviceId,
+    branchId: state.branch.id,
+    binding,
+    capabilities: state.capabilities,
+  });
 }
 
 function safeOptionalString(value: unknown, maxLength: number): string | undefined {
@@ -1037,6 +1120,8 @@ async function bootstrap(): Promise<void> {
     port: Number(process.env.JADE_AGENT_PROXY_PORT || DEFAULT_PROXY_PORT),
     getHealth,
     getDeviceStatus: () => toRegistrationSnapshot(state),
+    getPosDeviceProof: issueLocalPosDeviceProof,
+    allowedPosOrigin: resolveJpposAllowedOrigin(),
     safeLog: (event) => {
       if (process.env.NODE_ENV === 'production') return;
       // Safe metadata only: method/path/status. No bodies, tokens, keys, or setup codes.

@@ -1,11 +1,30 @@
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { hostname, platform, release } from 'node:os';
 
-import type { SafeDeviceIdentity } from '@jade-dev-agent/protocol';
+import type { DeviceCapability, SafeDeviceIdentity } from '@jade-dev-agent/protocol';
 
 export interface DeviceKeyPair {
   privateKeyPem: string;
   publicKeyPem: string;
+}
+
+export const POS_DEVICE_PROOF_VERSION = 'JP_POS_DEVICE_PROOF_V1';
+export const POS_DEVICE_PROOF_HEADER_TYP = 'JP-POS-DEVICE-PROOF';
+export const POS_DEVICE_PROOF_TTL_MS = 60_000;
+
+export interface CreatePosDeviceProofInput {
+  privateKeyPem: string;
+  deviceId: string;
+  branchId: string;
+  binding: string;
+  capabilities: readonly DeviceCapability[];
+  now?: Date;
+  nonce?: string;
+}
+
+export interface PosDeviceProofAssertion {
+  proof: string;
+  expiresAt: string;
 }
 
 export function generateDeviceKeyPair(): DeviceKeyPair {
@@ -62,4 +81,63 @@ export function signDeviceSessionPayload({
   payload: string;
 }): string {
   return sign(null, Buffer.from(payload, 'utf8'), privateKeyPem).toString('base64url');
+}
+
+export function buildPosDeviceProofSigningPayload({
+  deviceId,
+  branchId,
+  binding,
+  timestamp,
+  nonce,
+}: {
+  deviceId: string;
+  branchId: string;
+  binding: string;
+  timestamp: string;
+  nonce: string;
+}): string {
+  return [
+    POS_DEVICE_PROOF_VERSION,
+    deviceId.trim(),
+    branchId.trim(),
+    binding.trim(),
+    timestamp.trim(),
+    nonce.trim(),
+  ].join('\n');
+}
+
+function encodeJsonBase64Url(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+export function createPosDeviceProofAssertion({
+  privateKeyPem,
+  deviceId,
+  branchId,
+  binding,
+  capabilities,
+  now = new Date(),
+  nonce = randomBytes(18).toString('base64url'),
+}: CreatePosDeviceProofInput): PosDeviceProofAssertion {
+  const timestamp = now.toISOString();
+  const payload = {
+    v: POS_DEVICE_PROOF_VERSION,
+    deviceId: deviceId.trim(),
+    branchId: branchId.trim(),
+    binding: binding.trim(),
+    timestamp,
+    nonce,
+    capabilities: [...capabilities],
+  };
+  const header = {
+    alg: 'EdDSA',
+    typ: POS_DEVICE_PROOF_HEADER_TYP,
+    v: POS_DEVICE_PROOF_VERSION,
+  };
+  const signingPayload = buildPosDeviceProofSigningPayload(payload);
+  const signature = signDeviceSessionPayload({ privateKeyPem, payload: signingPayload });
+  return {
+    proof: `${encodeJsonBase64Url(header)}.${encodeJsonBase64Url(payload)}.${signature}`,
+    expiresAt: new Date(now.getTime() + POS_DEVICE_PROOF_TTL_MS).toISOString(),
+  };
 }

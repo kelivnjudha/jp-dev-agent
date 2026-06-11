@@ -5,7 +5,12 @@ import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/pr
 export const DEFAULT_PROXY_HOST = '127.0.0.1' as const;
 export const DEFAULT_PROXY_PORT = 17681;
 
-export const ALLOWED_PROXY_PATHS = ['/health', '/device/status', '/proxy/test'] as const;
+export const ALLOWED_PROXY_PATHS = [
+  '/health',
+  '/device/status',
+  '/proxy/test',
+  '/pos/device-proof',
+] as const;
 
 export type AllowedProxyPath = (typeof ALLOWED_PROXY_PATHS)[number];
 
@@ -13,7 +18,14 @@ export interface AgentProxyOptions {
   port?: number;
   getHealth: () => AgentHealth;
   getDeviceStatus: () => DeviceRegistrationSnapshot;
+  getPosDeviceProof?: (binding: string) => Promise<PosDeviceProofResponse>;
+  allowedPosOrigin?: string | null;
   safeLog?: (event: ProxyLogEvent) => void;
+}
+
+export interface PosDeviceProofResponse {
+  proof: string;
+  expiresAt: string;
 }
 
 export interface ProxyLogEvent {
@@ -27,6 +39,11 @@ export interface RunningAgentProxy {
   port: number;
   close: () => Promise<void>;
 }
+
+const POS_PROOF_RATE_LIMIT_WINDOW_MS = 60_000;
+const POS_PROOF_RATE_LIMIT_MAX = 30;
+const POS_PROOF_BINDING_RE = /^[A-Za-z0-9_-]{32,128}$/u;
+const posProofRateLimits = new Map<string, { count: number; resetAt: number }>();
 
 export function isAllowedProxyPath(pathname: string): pathname is AllowedProxyPath {
   return (ALLOWED_PROXY_PATHS as readonly string[]).includes(pathname);
@@ -44,12 +61,30 @@ export function resolveLocalProxyPath(rawUrl: string): string | null {
   }
 }
 
-function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
+function writeJson(
+  res: ServerResponse,
+  statusCode: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    ...headers,
   });
   res.end(JSON.stringify(body));
+}
+
+function writeEmpty(
+  res: ServerResponse,
+  statusCode: number,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(statusCode, {
+    'cache-control': 'no-store',
+    ...headers,
+  });
+  res.end();
 }
 
 async function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<Buffer> {
@@ -64,6 +99,54 @@ async function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<Buf
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
+}
+
+function corsHeadersForPosProof(origin: string): Record<string, string> {
+  return {
+    'access-control-allow-origin': origin,
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'access-control-allow-private-network': 'true',
+    vary: 'Origin',
+  };
+}
+
+function resolveAllowedPosOrigin(
+  req: IncomingMessage,
+  configuredOrigin: string | null | undefined,
+): { ok: true; headers: Record<string, string> } | { ok: false } {
+  const origin = req.headers.origin;
+  if (
+    typeof origin !== 'string'
+    || typeof configuredOrigin !== 'string'
+    || origin !== configuredOrigin
+  ) {
+    return { ok: false };
+  }
+  return { ok: true, headers: corsHeadersForPosProof(origin) };
+}
+
+function consumePosProofRateLimit(req: IncomingMessage): boolean {
+  const key = req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const current = posProofRateLimits.get(key);
+  if (!current || current.resetAt <= now) {
+    posProofRateLimits.set(key, {
+      count: 1,
+      resetAt: now + POS_PROOF_RATE_LIMIT_WINDOW_MS,
+    });
+    return true;
+  }
+  if (current.count >= POS_PROOF_RATE_LIMIT_MAX) return false;
+  current.count += 1;
+  return true;
+}
+
+function safeProxyErrorCode(error: unknown): string {
+  if (!(error instanceof Error)) return 'POS_DEVICE_PROOF_UNAVAILABLE';
+  return /^[A-Z0-9_]{3,80}$/u.test(error.message)
+    ? error.message
+    : 'POS_DEVICE_PROOF_UNAVAILABLE';
 }
 
 async function handleRequest(
@@ -95,6 +178,94 @@ async function handleRequest(
         code: 'AGENT_PROXY_PATH_NOT_ALLOWED',
         message: 'This local agent path is not available.',
       });
+      return;
+    }
+
+    if (path === '/pos/device-proof') {
+      const cors = resolveAllowedPosOrigin(req, options.allowedPosOrigin);
+      if (!cors.ok) {
+        statusCode = 403;
+        writeJson(res, statusCode, {
+          code: 'POS_DEVICE_PROOF_ORIGIN_NOT_ALLOWED',
+          message: 'This POS origin is not allowed.',
+        });
+        return;
+      }
+      if (req.method === 'OPTIONS') {
+        statusCode = 204;
+        writeEmpty(res, statusCode, cors.headers);
+        return;
+      }
+      if (req.method !== 'GET') {
+        statusCode = 405;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'AGENT_PROXY_METHOD_NOT_ALLOWED',
+            message: 'This method is not allowed on the local agent path.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      if (!consumePosProofRateLimit(req)) {
+        statusCode = 429;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'POS_DEVICE_PROOF_RATE_LIMITED',
+            message: 'POS device proof requests are rate limited.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      const url = new URL(rawUrl, `http://${DEFAULT_PROXY_HOST}`);
+      const binding = url.searchParams.get('binding') || '';
+      if (!POS_PROOF_BINDING_RE.test(binding)) {
+        statusCode = 400;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'POS_DEVICE_PROOF_BINDING_INVALID',
+            message: 'POS device proof binding is invalid.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      if (!options.getPosDeviceProof) {
+        statusCode = 503;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'POS_DEVICE_PROOF_UNAVAILABLE',
+            message: 'POS device proof is unavailable.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      try {
+        const proof = await options.getPosDeviceProof(binding);
+        statusCode = 200;
+        writeJson(res, statusCode, proof, cors.headers);
+      } catch (error) {
+        statusCode = 423;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: safeProxyErrorCode(error),
+            message: 'POS device proof is not ready.',
+          },
+          cors.headers,
+        );
+      }
       return;
     }
 
@@ -158,6 +329,10 @@ export function createAgentProxyServer(options: AgentProxyOptions): Server {
     void handleRequest(req, res, options);
   });
 }
+
+export const __INTERNAL_AGENT_PROXY_TESTING = {
+  posProofRateLimits,
+};
 
 export async function startAgentProxy(options: AgentProxyOptions): Promise<RunningAgentProxy> {
   const port = options.port ?? DEFAULT_PROXY_PORT;
