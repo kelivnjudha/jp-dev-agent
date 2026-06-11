@@ -1,4 +1,5 @@
 import type {
+  ActivationCheckStatus,
   AgentConnectionStatus,
   AgentRegistrationStatus,
   AgentMode,
@@ -32,6 +33,7 @@ export type ActivationCheckErrorCode =
   | 'CHALLENGE_EXPIRED'
   | 'SIGNING_PAYLOAD_MISMATCH'
   | 'API_UNAVAILABLE'
+  | 'RATE_LIMITED'
   | 'MALFORMED_RESPONSE'
   | 'CONFIG_INVALID'
   | 'LOCAL_IDENTITY_MISSING'
@@ -91,7 +93,11 @@ export interface AgentState {
   connectionStatus?: AgentConnectionStatus;
   sessionStatus?: string;
   sessionExpiresAt?: string | null;
+  activationCheckStatus?: ActivationCheckStatus;
   lastActivationCheckAt?: string;
+  nextActivationCheckAt?: string;
+  activationCheckFailures?: number;
+  lastActivationCheckErrorCode?: ActivationCheckErrorCode;
   lastHeartbeatAt?: string;
   nextHeartbeatAt?: string;
   heartbeatFailures?: number;
@@ -149,6 +155,7 @@ export function createPendingActivationState(
     claimedAt: pendingDevice.claimedAt,
     serverStatus: pendingDevice.serverStatus,
     connectionStatus: 'DISCONNECTED',
+    activationCheckStatus: 'IDLE',
     message,
     updatedAt: new Date().toISOString(),
   };
@@ -163,7 +170,9 @@ export function createInitialAgentStateFromPending(
 }
 
 export function startSetupCodeClaim(state: AgentState): AgentState {
-  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
+  const stateWithoutActiveSession = stripActivationPollingMetadata(
+    stripActiveSessionMetadata(state),
+  );
   return {
     ...stateWithoutActiveSession,
     status: 'SETUP_CODE_SUBMITTING',
@@ -178,7 +187,9 @@ export function failSetupCodeClaim(
   state: AgentState,
   errorCode: SetupCodeClaimErrorCode,
 ): AgentState {
-  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
+  const stateWithoutActiveSession = stripActivationPollingMetadata(
+    stripActiveSessionMetadata(state),
+  );
   return {
     ...stateWithoutActiveSession,
     status: 'ERROR',
@@ -191,13 +202,58 @@ export function failSetupCodeClaim(
 
 export function startActivationCheck(state: AgentState): AgentState {
   const stateWithoutActiveSession = stripActiveSessionMetadata(state);
+  const {
+    nextActivationCheckAt: _nextActivationCheckAt,
+    lastActivationCheckErrorCode: _lastActivationCheckErrorCode,
+    ...stateWithoutScheduledCheck
+  } = stateWithoutActiveSession;
   return {
-    ...stateWithoutActiveSession,
+    ...stateWithoutScheduledCheck,
     status: 'ACTIVE_SESSION_CONNECTING',
     connectionStatus: 'CHECKING_ACTIVATION',
+    activationCheckStatus: 'CHECKING',
     lastActivationCheckAt: new Date().toISOString(),
     message: 'Checking activation...',
     updatedAt: new Date().toISOString(),
+  };
+}
+
+export function scheduleActivationCheck(
+  state: AgentState,
+  options: {
+    nextActivationCheckAt: string;
+    status?: Extract<ActivationCheckStatus, 'WAITING' | 'RETRYING'>;
+    errorCode?: ActivationCheckErrorCode;
+    incrementFailures?: boolean;
+    message?: string;
+    nowIso?: string;
+  },
+): AgentState {
+  const now = options.nowIso ?? new Date().toISOString();
+  const status = options.status ?? (options.errorCode ? 'RETRYING' : 'WAITING');
+  const failureCount = options.incrementFailures
+    ? (state.activationCheckFailures ?? 0) + 1
+    : (state.activationCheckFailures ?? 0);
+  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
+  const {
+    lastActivationCheckErrorCode: _lastActivationCheckErrorCode,
+    ...stateWithoutPreviousError
+  } = stateWithoutActiveSession;
+  return {
+    ...stateWithoutPreviousError,
+    status: 'PENDING_ACTIVATION',
+    mode: 'SETUP',
+    connectionStatus: 'DISCONNECTED',
+    activationCheckStatus: status,
+    nextActivationCheckAt: options.nextActivationCheckAt,
+    activationCheckFailures: failureCount,
+    ...(options.errorCode ? { lastActivationCheckErrorCode: options.errorCode } : {}),
+    message:
+      options.message
+      ?? (status === 'RETRYING'
+        ? "Can't reach API. We'll try again."
+        : "Waiting for admin activation. We'll continue checking automatically."),
+    updatedAt: now,
   };
 }
 
@@ -206,6 +262,10 @@ export function completeActivationCheck(
   session: BranchDeviceSessionSummary,
 ): AgentState {
   const {
+    activationCheckStatus: _activationCheckStatus,
+    nextActivationCheckAt: _nextActivationCheckAt,
+    activationCheckFailures: _activationCheckFailures,
+    lastActivationCheckErrorCode: _lastActivationCheckErrorCode,
     lastHeartbeatAt: _lastHeartbeatAt,
     nextHeartbeatAt: _nextHeartbeatAt,
     heartbeatFailures: _heartbeatFailures,
@@ -485,12 +545,16 @@ export function failActivationCheck(
     sessionRefreshFailures: _sessionRefreshFailures,
     lastSessionRefreshErrorCode: _lastSessionRefreshErrorCode,
     futureProxyForwardingEligible: _futureProxyForwardingEligible,
+    activationCheckStatus: _activationCheckStatus,
+    nextActivationCheckAt: _nextActivationCheckAt,
     ...stateWithoutSession
   } = state;
   const base = {
     ...stateWithoutSession,
     connectionStatus: 'LOCKED' as const,
+    activationCheckStatus: 'IDLE' as const,
     lastActivationCheckAt: now,
+    lastActivationCheckErrorCode: errorCode,
     message: safeActivationCheckErrorMessage(errorCode),
     updatedAt: now,
   };
@@ -513,6 +577,7 @@ export function failActivationCheck(
     case 'CHALLENGE_EXPIRED':
       return { ...base, status: 'PENDING_ACTIVATION', mode: 'SETUP' };
     case 'API_UNAVAILABLE':
+    case 'RATE_LIMITED':
       return { ...base, status: 'PENDING_ACTIVATION', mode: 'SETUP' };
     default:
       return { ...base, status: 'ERROR', mode: 'SETUP' };
@@ -566,6 +631,8 @@ export function safeActivationCheckErrorMessage(
       return 'Activation challenge expired. Please try again.';
     case 'API_UNAVAILABLE':
       return 'Cannot reach Jade Palace API. Check the connection.';
+    case 'RATE_LIMITED':
+      return 'Activation check was rate limited. Please wait before trying again.';
     case 'MALFORMED_RESPONSE':
       return 'Unexpected server response. Device remains locked.';
     case 'CONFIG_INVALID':
@@ -683,7 +750,7 @@ export function mockActivateDevice(
     };
   }
   return {
-    ...state,
+    ...stripActivationPollingMetadata(state),
     status: 'ACTIVE',
     mode: modeForCapabilities(capabilities),
     capabilities,
@@ -693,7 +760,9 @@ export function mockActivateDevice(
 }
 
 export function disableDevice(state: AgentState, reason = 'Disabled'): AgentState {
-  const stateWithoutActiveSession = stripActiveSessionMetadata(state);
+  const stateWithoutActiveSession = stripActivationPollingMetadata(
+    stripActiveSessionMetadata(state),
+  );
   return {
     ...stateWithoutActiveSession,
     status: 'DISABLED',
@@ -744,6 +813,18 @@ export function toRegistrationSnapshot(
   }
   if (state.lastActivationCheckAt !== undefined) {
     snapshot.lastActivationCheckAt = state.lastActivationCheckAt;
+  }
+  if (state.activationCheckStatus !== undefined) {
+    snapshot.activationCheckStatus = state.activationCheckStatus;
+  }
+  if (state.nextActivationCheckAt !== undefined) {
+    snapshot.nextActivationCheckAt = state.nextActivationCheckAt;
+  }
+  if (state.activationCheckFailures !== undefined) {
+    snapshot.activationCheckFailures = state.activationCheckFailures;
+  }
+  if (state.lastActivationCheckErrorCode !== undefined) {
+    snapshot.lastActivationCheckErrorCode = state.lastActivationCheckErrorCode;
   }
   if (state.lastHeartbeatAt !== undefined) {
     snapshot.lastHeartbeatAt = state.lastHeartbeatAt;
@@ -803,4 +884,15 @@ function stripActiveSessionMetadata(state: AgentState): AgentState {
     ...stateWithoutActiveSession
   } = state;
   return stateWithoutActiveSession;
+}
+
+function stripActivationPollingMetadata(state: AgentState): AgentState {
+  const {
+    activationCheckStatus: _activationCheckStatus,
+    nextActivationCheckAt: _nextActivationCheckAt,
+    activationCheckFailures: _activationCheckFailures,
+    lastActivationCheckErrorCode: _lastActivationCheckErrorCode,
+    ...stateWithoutActivationPolling
+  } = state;
+  return stateWithoutActivationPolling;
 }

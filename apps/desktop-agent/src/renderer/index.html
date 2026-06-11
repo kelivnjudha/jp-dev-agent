@@ -65,7 +65,7 @@
               an authorized admin activates it in Branch Devices.
             </p>
             <div class="activation-actions">
-              <button id="check-activation" class="secondary" hidden>Check Activation</button>
+              <button id="check-activation" class="secondary" hidden>Check now</button>
             </div>
             <div id="dev-controls" class="dev-controls" hidden>
               <button id="mock-activate" class="secondary">Mock activate</button>
@@ -104,6 +104,18 @@
               <div>
                 <dt>Last check</dt>
                 <dd id="activation-checked-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Next check</dt>
+                <dd id="activation-next-detail">Not yet</dd>
+              </div>
+              <div>
+                <dt>Check state</dt>
+                <dd id="activation-status-detail">Idle</dd>
+              </div>
+              <div>
+                <dt>Check failures</dt>
+                <dd id="activation-failures-detail">0</dd>
               </div>
               <div>
                 <dt>Last heartbeat</dt>
@@ -267,7 +279,7 @@
 
       <footer>
         <span>Jade Palace Device Agent · local hardware console</span>
-        <span>Activation polling arrives in a later phase.</span>
+        <span>Activation polling runs automatically after setup-code claim.</span>
       </footer>
     </main>
     <script type="module" src="./renderer.js"></script>

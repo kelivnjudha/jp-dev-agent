@@ -25,6 +25,7 @@ import {
   failSessionRefreshTransient,
   failSetupCodeClaim,
   mockActivateDevice,
+  scheduleActivationCheck,
   scheduleSessionRefresh,
   startSessionRefresh,
   startHeartbeatLifecycle as startHeartbeatStateLifecycle,
@@ -82,6 +83,9 @@ const DEFAULT_MOCK_CAPABILITIES: DeviceCapability[] = [
 const HEARTBEAT_INTERVAL_MS = 45_000;
 const HEARTBEAT_RECONNECT_DELAYS_MS = [5_000, 15_000, 30_000, 60_000] as const;
 const SESSION_REFRESH_SAFETY_WINDOW_MS = 60_000;
+const ACTIVATION_POLL_INITIAL_DELAY_MS = 5_000;
+const ACTIVATION_POLL_INTERVAL_MS = 12_000;
+const ACTIVATION_POLL_API_RETRY_DELAYS_MS = [15_000, 30_000, 60_000] as const;
 
 type SessionRefreshReason =
   | 'scheduled'
@@ -89,6 +93,12 @@ type SessionRefreshReason =
   | 'heartbeat_session_expired'
   | 'missing_expiry_recovery'
   | 'retry';
+
+type ActivationCheckTrigger = 'manual' | 'poll';
+type ActivationScheduleOptions = Omit<
+  Parameters<typeof scheduleActivationCheck>[1],
+  'nextActivationCheckAt'
+>;
 
 let mainWindow: BrowserWindow | null = null;
 let state: AgentState = createInitialAgentState(false);
@@ -98,10 +108,12 @@ let deviceSessionToken: string | null = null;
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let activationPollTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatInFlight = false;
 let sessionRefreshInFlight = false;
 let heartbeatLifecycleVersion = 0;
 let sessionRefreshLifecycleVersion = 0;
+let activationPollLifecycleVersion = 0;
 let activationCheckInFlight = false;
 let sessionExpiredRefreshAttempted = false;
 let malformedExpiryRecoveryAttempted = false;
@@ -176,6 +188,17 @@ function clearReconnectTimer(): void {
   reconnectTimer = null;
 }
 
+function clearActivationPollTimer(): void {
+  if (!activationPollTimer) return;
+  clearTimeout(activationPollTimer);
+  activationPollTimer = null;
+}
+
+function stopActivationPolling(): void {
+  activationPollLifecycleVersion += 1;
+  clearActivationPollTimer();
+}
+
 function stopHeartbeatLifecycle(options: { clearToken?: boolean } = {}): void {
   heartbeatLifecycleVersion += 1;
   sessionRefreshLifecycleVersion += 1;
@@ -219,6 +242,75 @@ function scheduleReconnectTimer(delayMs: number, action: () => void): string {
     action();
   }, delayMs);
   return nextAttemptAt;
+}
+
+function canScheduleActivationPolling(): boolean {
+  return (
+    state.status === 'PENDING_ACTIVATION'
+    && !heartbeatInFlight
+    && !sessionRefreshInFlight
+    && state.connectionStatus !== 'REFRESHING'
+    && state.connectionStatus !== 'RECONNECTING'
+  );
+}
+
+function startActivationPolling(delayMs = ACTIVATION_POLL_INITIAL_DELAY_MS): void {
+  if (!canScheduleActivationPolling()) return;
+  const version = activationPollLifecycleVersion + 1;
+  activationPollLifecycleVersion = version;
+  scheduleActivationPollingTimer(version, delayMs, {
+    status: 'WAITING',
+    message: "Waiting for admin activation. We'll continue checking automatically.",
+  });
+}
+
+function scheduleActivationPollingTimer(
+  version: number,
+  delayMs: number,
+  options: ActivationScheduleOptions,
+): void {
+  if (version !== activationPollLifecycleVersion || !canScheduleActivationPolling()) return;
+  clearActivationPollTimer();
+  const nextActivationCheckAt = new Date(Date.now() + delayMs).toISOString();
+  activationPollTimer = setTimeout(() => {
+    activationPollTimer = null;
+    void runActivationCheck('poll', version);
+  }, delayMs);
+  state = scheduleActivationCheck(state, {
+    ...options,
+    nextActivationCheckAt,
+  });
+}
+
+function scheduleActivationRetry(
+  version: number,
+  errorCode: ActivationCheckErrorCode,
+): void {
+  if (version !== activationPollLifecycleVersion || !canScheduleActivationPolling()) return;
+  const isApiRetry = isApiUnavailableActivationFailure(errorCode);
+  const nextFailureCount = isApiRetry
+    ? (state.activationCheckFailures ?? 0) + 1
+    : (state.activationCheckFailures ?? 0);
+  const backoffIndex = Math.min(
+    Math.max(nextFailureCount - 1, 0),
+    ACTIVATION_POLL_API_RETRY_DELAYS_MS.length - 1,
+  );
+  const delayMs = isApiRetry
+    ? ACTIVATION_POLL_API_RETRY_DELAYS_MS[backoffIndex] ?? 60_000
+    : ACTIVATION_POLL_INTERVAL_MS;
+  const options: ActivationScheduleOptions = {
+    status: isApiRetry ? 'RETRYING' : 'WAITING',
+    incrementFailures: isApiRetry,
+    message: isApiRetry
+      ? "Can't reach API. We'll try again."
+      : "Waiting for admin activation. We'll continue checking automatically.",
+  };
+  if (isApiRetry) {
+    options.errorCode = errorCode;
+  }
+  scheduleActivationPollingTimer(version, delayMs, {
+    ...options,
+  });
 }
 
 function pauseHeartbeatForSessionRefresh(): void {
@@ -503,6 +595,18 @@ function isTransientSessionRefreshFailure(errorCode: SessionRefreshFailureErrorC
   return errorCode === 'API_UNAVAILABLE' || errorCode === 'RATE_LIMITED';
 }
 
+function isRetryableActivationFailure(errorCode: ActivationCheckErrorCode): boolean {
+  return (
+    errorCode === 'DEVICE_NOT_ACTIVE'
+    || errorCode === 'CHALLENGE_EXPIRED'
+    || isApiUnavailableActivationFailure(errorCode)
+  );
+}
+
+function isApiUnavailableActivationFailure(errorCode: ActivationCheckErrorCode): boolean {
+  return errorCode === 'API_UNAVAILABLE' || errorCode === 'RATE_LIMITED';
+}
+
 function parseSessionExpiresAtMs(value: string | null | undefined): number | null {
   if (!value) return null;
   const expiresAtMs = new Date(value).getTime();
@@ -517,6 +621,121 @@ function isValidActiveSession(session: BranchDeviceSessionSummary): boolean {
 function assertValidSessionIssue(sessionIssue: BranchDeviceSessionIssueResponse): void {
   if (!sessionIssue.sessionToken.trim() || !isValidActiveSession(sessionIssue.session)) {
     throw new BranchDeviceApiError('MALFORMED_RESPONSE');
+  }
+}
+
+async function runActivationCheck(
+  trigger: ActivationCheckTrigger,
+  version = activationPollLifecycleVersion,
+): Promise<void> {
+  if (trigger === 'poll' && version !== activationPollLifecycleVersion) return;
+
+  if (state.status === 'SESSION_EXPIRED_RETRYING' && deviceSessionToken) return;
+
+  if (state.status === 'ACTIVE' && deviceSessionToken) {
+    if (
+      sessionRefreshInFlight
+      || state.connectionStatus === 'REFRESHING'
+      || state.connectionStatus === 'RECONNECTING'
+    ) {
+      return;
+    }
+    ensureHeartbeatLifecycle();
+    ensureSessionRefreshLifecycle();
+    return;
+  }
+
+  if (
+    activationCheckInFlight
+    || heartbeatInFlight
+    || sessionRefreshInFlight
+    || state.connectionStatus === 'REFRESHING'
+    || state.connectionStatus === 'RECONNECTING'
+  ) {
+    return;
+  }
+
+  clearActivationPollTimer();
+  activationCheckInFlight = true;
+  const retryVersion = version || activationPollLifecycleVersion || 1;
+  activationPollLifecycleVersion = retryVersion;
+
+  try {
+    const apiBaseUrl = resolveApiBaseUrl();
+    if (!apiBaseUrl) {
+      stopActivationPolling();
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(state, 'CONFIG_INVALID');
+      return;
+    }
+
+    const pendingDevice = (await storage?.readPendingDevice()) ?? pendingDeviceFromState();
+    if (!pendingDevice) {
+      stopActivationPolling();
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(state, 'UNKNOWN');
+      return;
+    }
+
+    const identity = await storage?.readIdentity();
+    if (!identity) {
+      stopActivationPolling();
+      stopHeartbeatLifecycle();
+      state = failActivationCheck(
+        createPendingActivationState(pendingDevice),
+        'LOCAL_IDENTITY_MISSING',
+      );
+      return;
+    }
+
+    stopHeartbeatLifecycle();
+    const pendingForCheck = createPendingActivationState(pendingDevice);
+    pendingForCheck.activationCheckFailures = state.activationCheckFailures ?? 0;
+    if (state.lastActivationCheckErrorCode !== undefined) {
+      pendingForCheck.lastActivationCheckErrorCode = state.lastActivationCheckErrorCode;
+    }
+    state = startActivationCheck(pendingForCheck);
+
+    const config = {
+      apiBaseUrl,
+      appVersion: APP_VERSION,
+    };
+    const challenge = await requestBranchDeviceSessionChallenge(
+      config,
+      pendingDevice.deviceId,
+    );
+    const signingPayload = validateBranchDeviceSessionChallengeSigningPayload({
+      deviceId: pendingDevice.deviceId,
+      challenge,
+    });
+    const signature = signDeviceSessionPayload({
+      privateKeyPem: identity.privateKeyPem,
+      payload: signingPayload,
+    });
+    const sessionIssue = await issueBranchDeviceSession(config, {
+      deviceId: pendingDevice.deviceId,
+      challenge: challenge.challenge,
+      signature,
+      timestamp: challenge.timestamp,
+    });
+    assertValidSessionIssue(sessionIssue);
+    stopActivationPolling();
+    deviceSessionToken = sessionIssue.sessionToken;
+    sessionExpiredRefreshAttempted = false;
+    malformedExpiryRecoveryAttempted = false;
+    state = completeActivationCheck(state, sessionIssue.session);
+    startHeartbeatLifecycle();
+  } catch (error) {
+    const errorCode = mapActivationFailure(error);
+    stopHeartbeatLifecycle();
+    state = failActivationCheck(state, errorCode);
+    if (isRetryableActivationFailure(errorCode)) {
+      scheduleActivationRetry(retryVersion, errorCode);
+      return;
+    }
+    stopActivationPolling();
+  } finally {
+    activationCheckInFlight = false;
   }
 }
 
@@ -669,6 +888,7 @@ function mapActivationFailure(error: unknown): ActivationCheckErrorCode {
       case 'SESSION_CHALLENGE_INVALID':
       case 'SESSION_SIGNATURE_INVALID':
       case 'API_UNAVAILABLE':
+      case 'RATE_LIMITED':
       case 'MALFORMED_RESPONSE':
         return error.code;
       default:
@@ -825,6 +1045,9 @@ async function bootstrap(): Promise<void> {
   });
 
   createWindow();
+  if (state.status === 'PENDING_ACTIVATION') {
+    startActivationPolling(ACTIVATION_POLL_INITIAL_DELAY_MS);
+  }
 }
 
 ipcMain.handle('agent:getSnapshot', () => getSnapshot());
@@ -833,6 +1056,7 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
   // Safe claim trace — event markers only; never the setup code, keys,
   // fingerprints, or request/response bodies.
   console.info('[claim-trace] IPC_RECEIVED');
+  stopActivationPolling();
   stopHeartbeatLifecycle();
   const rawSetupCode = typeof setupCode === 'string' ? setupCode.trim() : '';
   if (!rawSetupCode) {
@@ -881,8 +1105,9 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
     await storage?.writePendingDevice(pendingDevice);
     state = createPendingActivationState(
       pendingDevice,
-      'Waiting for Admin Activation. Ask Main Admin or an authorized Admin to activate this device in JP Admin.',
+      "Waiting for admin activation. We'll continue checking automatically.",
     );
+    startActivationPolling(ACTIVATION_POLL_INITIAL_DELAY_MS);
     console.info('[claim-trace] CLAIM_API_CALL_DONE status=PENDING_ACTIVATION');
   } catch (error) {
     const failureCode = mapClaimFailure(error);
@@ -893,96 +1118,13 @@ ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, device
 });
 
 ipcMain.handle('agent:checkActivation', async () => {
-  if (state.status === 'SESSION_EXPIRED_RETRYING' && deviceSessionToken) {
-    return getSnapshot();
-  }
-
-  if (state.status === 'ACTIVE' && deviceSessionToken) {
-    if (
-      sessionRefreshInFlight
-      || state.connectionStatus === 'REFRESHING'
-      || state.connectionStatus === 'RECONNECTING'
-    ) {
-      return getSnapshot();
-    }
-    ensureHeartbeatLifecycle();
-    ensureSessionRefreshLifecycle();
-    return getSnapshot();
-  }
-
-  if (activationCheckInFlight) {
-    return getSnapshot();
-  }
-
-  activationCheckInFlight = true;
-  try {
-    const apiBaseUrl = resolveApiBaseUrl();
-    if (!apiBaseUrl) {
-      stopHeartbeatLifecycle();
-      state = failActivationCheck(state, 'CONFIG_INVALID');
-      return getSnapshot();
-    }
-
-    const pendingDevice = (await storage?.readPendingDevice()) ?? pendingDeviceFromState();
-    if (!pendingDevice) {
-      stopHeartbeatLifecycle();
-      state = failActivationCheck(state, 'UNKNOWN');
-      return getSnapshot();
-    }
-
-    const identity = await storage?.readIdentity();
-    if (!identity) {
-      stopHeartbeatLifecycle();
-      state = failActivationCheck(
-        createPendingActivationState(pendingDevice),
-        'LOCAL_IDENTITY_MISSING',
-      );
-      return getSnapshot();
-    }
-
-    stopHeartbeatLifecycle();
-    state = startActivationCheck(createPendingActivationState(pendingDevice));
-
-    const config = {
-      apiBaseUrl,
-      appVersion: APP_VERSION,
-    };
-    const challenge = await requestBranchDeviceSessionChallenge(
-      config,
-      pendingDevice.deviceId,
-    );
-    const signingPayload = validateBranchDeviceSessionChallengeSigningPayload({
-      deviceId: pendingDevice.deviceId,
-      challenge,
-    });
-    const signature = signDeviceSessionPayload({
-      privateKeyPem: identity.privateKeyPem,
-      payload: signingPayload,
-    });
-    const sessionIssue = await issueBranchDeviceSession(config, {
-      deviceId: pendingDevice.deviceId,
-      challenge: challenge.challenge,
-      signature,
-      timestamp: challenge.timestamp,
-    });
-    assertValidSessionIssue(sessionIssue);
-    deviceSessionToken = sessionIssue.sessionToken;
-    sessionExpiredRefreshAttempted = false;
-    malformedExpiryRecoveryAttempted = false;
-    state = completeActivationCheck(state, sessionIssue.session);
-    startHeartbeatLifecycle();
-  } catch (error) {
-    stopHeartbeatLifecycle();
-    state = failActivationCheck(state, mapActivationFailure(error));
-  } finally {
-    activationCheckInFlight = false;
-  }
-
+  await runActivationCheck('manual');
   return getSnapshot();
 });
 
 ipcMain.handle('agent:mockActivate', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
+  stopActivationPolling();
   stopHeartbeatLifecycle();
   state = mockActivateDevice(state, DEFAULT_MOCK_CAPABILITIES);
   return getSnapshot();
@@ -990,6 +1132,7 @@ ipcMain.handle('agent:mockActivate', () => {
 
 ipcMain.handle('agent:disable', () => {
   if (!MOCK_FLOW_ENABLED) return getSnapshot();
+  stopActivationPolling();
   stopHeartbeatLifecycle();
   state = disableDevice(state, 'DEV ONLY: device disabled locally.');
   return getSnapshot();
@@ -1021,6 +1164,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', (event) => {
+  stopActivationPolling();
   stopHeartbeatLifecycle();
   if (!proxy) return;
   event.preventDefault();

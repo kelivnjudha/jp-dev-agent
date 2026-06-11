@@ -52,6 +52,9 @@ const claimedAtDetail = document.querySelector<HTMLElement>('#claimed-at-detail'
 const sessionStatusDetail = document.querySelector<HTMLElement>('#session-status-detail');
 const sessionExpiresDetail = document.querySelector<HTMLElement>('#session-expires-detail');
 const activationCheckedDetail = document.querySelector<HTMLElement>('#activation-checked-detail');
+const activationNextDetail = document.querySelector<HTMLElement>('#activation-next-detail');
+const activationStatusDetail = document.querySelector<HTMLElement>('#activation-status-detail');
+const activationFailuresDetail = document.querySelector<HTMLElement>('#activation-failures-detail');
 const lastHeartbeatDetail = document.querySelector<HTMLElement>('#last-heartbeat-detail');
 const nextHeartbeatDetail = document.querySelector<HTMLElement>('#next-heartbeat-detail');
 const nextRefreshDetail = document.querySelector<HTMLElement>('#next-refresh-detail');
@@ -200,6 +203,17 @@ function render(next: ViewModel): void {
   );
   setText(sessionExpiresDetail, formatDateTime(registration.sessionExpiresAt ?? undefined));
   setText(activationCheckedDetail, formatDateTime(registration.lastActivationCheckAt));
+  setText(activationNextDetail, formatDateTime(registration.nextActivationCheckAt));
+  setText(
+    activationStatusDetail,
+    (registration.activationCheckStatus ?? 'IDLE').replaceAll('_', ' '),
+  );
+  setText(
+    activationFailuresDetail,
+    registration.activationCheckFailures && registration.activationCheckFailures > 0
+      ? String(registration.activationCheckFailures)
+      : '0',
+  );
   setText(lastHeartbeatDetail, formatDateTime(registration.lastHeartbeatAt));
   setText(nextHeartbeatDetail, formatDateTime(registration.nextHeartbeatAt));
   setText(nextRefreshDetail, formatDateTime(registration.nextSessionRefreshAt));
@@ -242,12 +256,14 @@ function render(next: ViewModel): void {
     if (registration.deviceLabel) deviceLabelInput.value = registration.deviceLabel;
   }
   if (checkActivationButton) {
-    const checking = registration.status === 'ACTIVE_SESSION_CONNECTING';
+    const checking =
+      registration.status === 'ACTIVE_SESSION_CONNECTING'
+      || registration.activationCheckStatus === 'CHECKING';
     checkActivationButton.hidden = !['PENDING_ACTIVATION', 'ACTIVE_SESSION_CONNECTING'].includes(
       registration.status,
     );
     checkActivationButton.disabled = checking;
-    checkActivationButton.textContent = checking ? 'Checking...' : 'Check Activation';
+    checkActivationButton.textContent = checking ? 'Checking...' : 'Check now';
   }
   if (activateButton) {
     activateButton.disabled = !next.controls.mockFlowEnabled || registration.status !== 'PENDING_ACTIVATION';
@@ -498,7 +514,7 @@ checkActivationButton?.addEventListener('click', () => {
     .catch(() => {
       if (checkActivationButton) {
         checkActivationButton.disabled = false;
-        checkActivationButton.textContent = 'Check Activation';
+        checkActivationButton.textContent = 'Check now';
       }
       setText(message, 'Activation check failed. Device remains locked.');
       pushTimelineEvent('ACTIVATE', 'danger', 'Activation check failed — device remains locked');

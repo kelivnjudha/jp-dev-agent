@@ -95,6 +95,62 @@ test('session challenge, signing, and token handling stay main-process only', as
   assert.doesNotMatch(renderer, /sessionToken/);
 });
 
+test('activation polling stays main-process only and reuses activation runner', async () => {
+  const [main, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  assert.match(main, /ACTIVATION_POLL_INITIAL_DELAY_MS = 5_000/);
+  assert.match(main, /ACTIVATION_POLL_INTERVAL_MS = 12_000/);
+  assert.match(main, /ACTIVATION_POLL_API_RETRY_DELAYS_MS = \[15_000, 30_000, 60_000\]/);
+  assert.match(main, /let activationPollTimer/);
+  assert.match(main, /activationPollLifecycleVersion/);
+  assert.match(main, /activationCheckInFlight/);
+  assert.match(main, /async function runActivationCheck/);
+  assert.match(main, /scheduleActivationRetry/);
+  assert.match(main, /startActivationPolling\(ACTIVATION_POLL_INITIAL_DELAY_MS\)/);
+  assert.doesNotMatch(preload, /activationPollTimer|runActivationCheck|requestBranchDeviceSessionChallenge/);
+  assert.doesNotMatch(renderer, /setTimeout|setInterval|requestBranchDeviceSessionChallenge/);
+  assert.doesNotMatch(renderer, /privateKeyPem|sessionToken|signDeviceSessionPayload/);
+});
+
+test('activation polling stops on active, terminal, mock, disable, and app quit paths', async () => {
+  const main = await readSource('apps/desktop-agent/src/main/main.ts');
+
+  const runActivationIndex = main.indexOf('async function runActivationCheck');
+  const successStopIndex = main.indexOf('stopActivationPolling();', main.indexOf('assertValidSessionIssue(sessionIssue)', runActivationIndex));
+  const terminalStopIndex = main.indexOf('stopActivationPolling();', main.indexOf('state = failActivationCheck(state, errorCode)', runActivationIndex));
+  const mockIndex = main.indexOf("ipcMain.handle('agent:mockActivate'");
+  const disableIndex = main.indexOf("ipcMain.handle('agent:disable'");
+  const quitIndex = main.indexOf("app.on('before-quit'");
+
+  assert.ok(runActivationIndex > -1);
+  assert.ok(successStopIndex > runActivationIndex);
+  assert.ok(terminalStopIndex > runActivationIndex);
+  assert.match(main, /ipcMain\.handle\('agent:claimSetupCode'[\s\S]*stopActivationPolling\(\)/);
+  assert.ok(main.indexOf('stopActivationPolling();', mockIndex) > mockIndex);
+  assert.ok(main.indexOf('stopActivationPolling();', disableIndex) > disableIndex);
+  assert.ok(main.indexOf('stopActivationPolling();', quitIndex) > quitIndex);
+});
+
+test('automatic activation success starts heartbeat only after session issue validation', async () => {
+  const main = await readSource('apps/desktop-agent/src/main/main.ts');
+  const activationStart = main.indexOf('async function runActivationCheck');
+  const issueIndex = main.indexOf('const sessionIssue = await issueBranchDeviceSession', activationStart);
+  const validateIndex = main.indexOf('assertValidSessionIssue(sessionIssue)', issueIndex);
+  const tokenIndex = main.indexOf('deviceSessionToken = sessionIssue.sessionToken', validateIndex);
+  const completeIndex = main.indexOf('completeActivationCheck(state, sessionIssue.session)', tokenIndex);
+  const heartbeatIndex = main.indexOf('startHeartbeatLifecycle()', completeIndex);
+
+  assert.ok(issueIndex > activationStart);
+  assert.ok(validateIndex > issueIndex);
+  assert.ok(tokenIndex > validateIndex);
+  assert.ok(completeIndex > tokenIndex);
+  assert.ok(heartbeatIndex > completeIndex);
+});
+
 test('heartbeat handling stays main-process only and guarded against duplicate loops', async () => {
   const [main, preload, renderer] = await Promise.all([
     readSource('apps/desktop-agent/src/main/main.ts'),

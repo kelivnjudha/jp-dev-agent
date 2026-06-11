@@ -87,6 +87,16 @@ export const AGENT_CONNECTION_STATUSES = [
 export type AgentConnectionStatus =
   (typeof AGENT_CONNECTION_STATUSES)[number];
 
+export const ACTIVATION_CHECK_STATUSES = [
+  'IDLE',
+  'CHECKING',
+  'WAITING',
+  'RETRYING',
+] as const;
+
+export type ActivationCheckStatus =
+  (typeof ACTIVATION_CHECK_STATUSES)[number];
+
 export const SCAN_SOURCES = ['WEDGE', 'HID', 'SERIAL'] as const;
 
 export type ScanSource = (typeof SCAN_SOURCES)[number];
@@ -317,7 +327,11 @@ export interface DeviceRegistrationSnapshot {
   connectionStatus?: AgentConnectionStatus;
   sessionStatus?: string;
   sessionExpiresAt?: string | null;
+  activationCheckStatus?: ActivationCheckStatus;
   lastActivationCheckAt?: string;
+  nextActivationCheckAt?: string;
+  activationCheckFailures?: number;
+  lastActivationCheckErrorCode?: string;
   lastHeartbeatAt?: string;
   nextHeartbeatAt?: string;
   heartbeatFailures?: number;

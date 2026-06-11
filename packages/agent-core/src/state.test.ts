@@ -22,6 +22,7 @@ import {
   safeActivationCheckErrorMessage,
   safeHeartbeatErrorMessage,
   safeSetupCodeClaimErrorMessage,
+  scheduleActivationCheck,
   scheduleSessionRefresh,
   startSessionRefresh,
   startHeartbeatLifecycle,
@@ -116,7 +117,60 @@ test('activation check transitions through connecting without secrets', () => {
   const connecting = startActivationCheck(pending);
   assert.equal(connecting.status, 'ACTIVE_SESSION_CONNECTING');
   assert.equal(connecting.connectionStatus, 'CHECKING_ACTIVATION');
+  assert.equal(connecting.activationCheckStatus, 'CHECKING');
   assert.equal(JSON.stringify(connecting).includes('sessionToken'), false);
+});
+
+test('automatic activation polling exposes safe waiting metadata only', () => {
+  const pending = createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: { id: 'b0000000-0000-4000-8000-000000000001', code: 'BKK', name: 'Bangkok' },
+    allowedCapabilities: ['POS_TERMINAL', 'BARCODE_SCANNER'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  });
+  const waiting = scheduleActivationCheck(pending, {
+    nextActivationCheckAt: '2026-06-04T01:00:05.000Z',
+    status: 'WAITING',
+    nowIso: '2026-06-04T01:00:00.000Z',
+  });
+  const snapshot = toRegistrationSnapshot(waiting);
+
+  assert.equal(snapshot.status, 'PENDING_ACTIVATION');
+  assert.equal(snapshot.activationCheckStatus, 'WAITING');
+  assert.equal(snapshot.nextActivationCheckAt, '2026-06-04T01:00:05.000Z');
+  assert.equal(snapshot.activationCheckFailures, 0);
+  assert.equal(
+    snapshot.message,
+    "Waiting for admin activation. We'll continue checking automatically.",
+  );
+  assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
+  assert.equal(JSON.stringify(snapshot).includes('privateKeyPem'), false);
+});
+
+test('API-unavailable activation polling retries with safe failure metadata', () => {
+  const pending = createPendingActivationState({
+    deviceId: 'd0000000-0000-4000-8000-000000000001',
+    serverStatus: 'PENDING_ACTIVATION',
+    branch: null,
+    allowedCapabilities: ['POS_TERMINAL'],
+    safeHidPrefix: 'ABCD-12345678',
+    claimedAt: '2026-06-04T01:00:00.000Z',
+  });
+  const retrying = scheduleActivationCheck(pending, {
+    nextActivationCheckAt: '2026-06-04T01:00:15.000Z',
+    status: 'RETRYING',
+    errorCode: 'API_UNAVAILABLE',
+    incrementFailures: true,
+    nowIso: '2026-06-04T01:00:00.000Z',
+  });
+  const snapshot = toRegistrationSnapshot(retrying);
+
+  assert.equal(snapshot.activationCheckStatus, 'RETRYING');
+  assert.equal(snapshot.activationCheckFailures, 1);
+  assert.equal(snapshot.lastActivationCheckErrorCode, 'API_UNAVAILABLE');
+  assert.equal(snapshot.message, "Can't reach API. We'll try again.");
 });
 
 test('successful activation check stores safe session metadata only', () => {
@@ -137,6 +191,9 @@ test('successful activation check stores safe session metadata only', () => {
   assert.equal(snapshot.connectionStatus, 'CONNECTED');
   assert.equal(snapshot.sessionStatus, 'ACTIVE');
   assert.equal(snapshot.sessionExpiresAt, '2026-06-04T13:00:00.000Z');
+  assert.equal(snapshot.activationCheckStatus, undefined);
+  assert.equal(snapshot.nextActivationCheckAt, undefined);
+  assert.equal(snapshot.activationCheckFailures, undefined);
   assert.equal(JSON.stringify(snapshot).includes('sessionToken'), false);
   assert.equal(JSON.stringify(snapshot).includes('privateKeyPem'), false);
   assert.equal(JSON.stringify(snapshot).includes('publicKeyPem'), false);
