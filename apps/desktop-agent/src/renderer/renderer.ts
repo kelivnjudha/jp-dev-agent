@@ -391,6 +391,12 @@ function renderScanResult(result: ScanValidationResult): void {
   pushTimelineEvent('SCAN ERR', 'danger', `${result.code.replaceAll('_', ' ')} · ${result.valueLength} chars`);
 }
 
+function clearScannerDevValue(): void {
+  if (!scannerDevValue || !scannerDevValueText) return;
+  scannerDevValueText.textContent = '';
+  scannerDevValue.hidden = true;
+}
+
 async function refresh(): Promise<void> {
   const bridge = bridgeOrNull();
   if (!bridge) {
@@ -410,6 +416,7 @@ async function validateScannerCapture(): Promise<void> {
     scannerInput.value = '';
     scannerInput.focus();
   }
+  clearScannerDevValue();
   if (scannerValidateButton) scannerValidateButton.disabled = true;
   try {
     const result = await window.jadeAgent.validateScannerInput(capturedText);
@@ -421,6 +428,7 @@ async function validateScannerCapture(): Promise<void> {
     setText(scannerOutcome, 'Scanner validation failed');
     setText(scannerMeta, 'Harness could not validate this capture.');
     if (scannerErrorHelp) scannerErrorHelp.hidden = true;
+    clearScannerDevValue();
   } finally {
     if (scannerValidateButton) scannerValidateButton.disabled = false;
   }

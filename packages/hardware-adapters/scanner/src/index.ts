@@ -52,8 +52,13 @@ interface ParsedCapture {
 }
 
 interface ScanCore {
-  event: ScanEvent;
-  normalizedValue: string;
+  result: ScanValidationResult;
+  normalizedHash: string | null;
+}
+
+interface AcceptedScanCore {
+  result: { ok: true; event: ScanEvent };
+  normalizedHash: string;
 }
 
 const aimPrefixHints: Record<string, AimPrefixHint> = {
@@ -66,7 +71,7 @@ const aimPrefixHints: Record<string, AimPrefixHint> = {
 };
 
 export class WedgeScannerHarnessAdapter implements ScannerAdapter {
-  private acceptedScans: Array<{ valueHashPrefix: string; capturedAtMs: number }> = [];
+  private acceptedScans: Array<{ normalizedHash: string; capturedAtMs: number }> = [];
   private lastScanAt: string | null = null;
   private lastOutcome: 'ACCEPTED' | ScanValidationErrorCode | null = null;
   private duplicateCount = 0;
@@ -76,14 +81,17 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
 
   async validateInput(input: unknown): Promise<ScanValidationResult> {
     const now = this.options.now?.() ?? new Date();
-    const baseResult = validateScanPayload(input, {
+    const core = validateScanPayloadCore(input, {
       source: 'WEDGE',
       now,
       includeValue: this.options.includeValue === true,
     });
-    const result = baseResult.ok
-      ? this.applyDebounceAndRateLimit(baseResult, now)
-      : baseResult;
+    const result = core.result.ok && core.normalizedHash
+      ? this.applyDebounceAndRateLimit({
+        result: core.result,
+        normalizedHash: core.normalizedHash,
+      }, now)
+      : core.result;
 
     this.updateStatus(result);
     this.options.safeLog?.(buildSafeScannerLogEvent(result));
@@ -102,9 +110,10 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
   }
 
   private applyDebounceAndRateLimit(
-    result: ScanValidationResult & { ok: true },
+    core: AcceptedScanCore,
     now: Date,
   ): ScanValidationResult {
+    const { result, normalizedHash } = core;
     const capturedAtMs = now.getTime();
     this.acceptedScans = this.acceptedScans.filter(
       (entry) => capturedAtMs - entry.capturedAtMs <= RATE_LIMIT_WINDOW_MS,
@@ -112,7 +121,7 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
 
     const duplicate = this.acceptedScans.find(
       (entry) =>
-        entry.valueHashPrefix === result.event.valueHashPrefix
+        entry.normalizedHash === normalizedHash
         && capturedAtMs - entry.capturedAtMs <= DUPLICATE_WINDOW_MS,
     );
     if (duplicate) {
@@ -136,7 +145,7 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
     }
 
     this.acceptedScans.push({
-      valueHashPrefix: result.event.valueHashPrefix,
+      normalizedHash,
       capturedAtMs,
     });
     return result;
@@ -158,80 +167,113 @@ export function validateScanPayload(
   input: unknown,
   options: ScanValidationOptions = {},
 ): ScanValidationResult {
+  return validateScanPayloadCore(input, options).result;
+}
+
+function validateScanPayloadCore(
+  input: unknown,
+  options: ScanValidationOptions = {},
+): ScanCore {
   const source = options.source ?? 'WEDGE';
   const capturedAt = (options.now ?? new Date()).toISOString();
   const normalizedInput = normalizeScannerInput(input);
   if (!normalizedInput) {
-    return buildValidationError({
-      code: 'SCAN_EMPTY',
-      capturedAt,
-      source,
-      valueLength: 0,
-      valueHashPrefix: null,
-    });
+    return {
+      result: buildValidationError({
+        code: 'SCAN_EMPTY',
+        capturedAt,
+        source,
+        valueLength: 0,
+        valueHashPrefix: null,
+      }),
+      normalizedHash: null,
+    };
   }
 
   if (normalizedInput.length > (options.maxLength ?? DEFAULT_MAX_SCAN_LENGTH)) {
-    return buildValidationError({
-      code: 'SCAN_TOO_LONG',
-      capturedAt,
-      source,
-      valueLength: normalizedInput.length,
-      valueHashPrefix: hashPrefix(normalizedInput),
-    });
+    const normalizedHash = hashValue(normalizedInput);
+    return {
+      result: buildValidationError({
+        code: 'SCAN_TOO_LONG',
+        capturedAt,
+        source,
+        valueLength: normalizedInput.length,
+        valueHashPrefix: hashPrefixFromHash(normalizedHash),
+      }),
+      normalizedHash,
+    };
   }
 
   if (CONTROL_CHAR_PATTERN.test(normalizedInput)) {
-    return buildValidationError({
-      code: 'SCAN_CONTROL_CHARS',
-      capturedAt,
-      source,
-      valueLength: normalizedInput.length,
-      valueHashPrefix: hashPrefix(normalizedInput),
-    });
+    const normalizedHash = hashValue(normalizedInput);
+    return {
+      result: buildValidationError({
+        code: 'SCAN_CONTROL_CHARS',
+        capturedAt,
+        source,
+        valueLength: normalizedInput.length,
+        valueHashPrefix: hashPrefixFromHash(normalizedHash),
+      }),
+      normalizedHash,
+    };
   }
 
   if (!PRINTABLE_ASCII_PATTERN.test(normalizedInput)) {
-    return buildValidationError({
-      code: 'SCAN_INVALID_CHARSET',
-      capturedAt,
-      source,
-      valueLength: normalizedInput.length,
-      valueHashPrefix: hashPrefix(normalizedInput),
-    });
+    const normalizedHash = hashValue(normalizedInput);
+    return {
+      result: buildValidationError({
+        code: 'SCAN_INVALID_CHARSET',
+        capturedAt,
+        source,
+        valueLength: normalizedInput.length,
+        valueHashPrefix: hashPrefixFromHash(normalizedHash),
+      }),
+      normalizedHash,
+    };
   }
 
   const parsed = parseAimPrefix(normalizedInput);
   if (!parsed.value) {
-    return buildValidationError({
-      code: 'SCAN_EMPTY',
-      capturedAt,
-      source,
-      valueLength: 0,
-      valueHashPrefix: null,
-    });
+    return {
+      result: buildValidationError({
+        code: 'SCAN_EMPTY',
+        capturedAt,
+        source,
+        valueLength: 0,
+        valueHashPrefix: null,
+      }),
+      normalizedHash: null,
+    };
   }
 
+  const normalizedHash = hashValue(parsed.value);
   const inferred = inferSymbology(parsed);
   if (!inferred.ok) {
-    return buildValidationError({
-      code: inferred.code,
-      capturedAt,
-      source,
-      valueLength: parsed.value.length,
-      valueHashPrefix: hashPrefix(parsed.value),
-    });
+    return {
+      result: buildValidationError({
+        code: inferred.code,
+        capturedAt,
+        source,
+        valueLength: parsed.value.length,
+        valueHashPrefix: hashPrefixFromHash(normalizedHash),
+      }),
+      normalizedHash,
+    };
   }
 
   return {
-    ok: true,
-    event: buildScanEvent({
-      normalizedValue: parsed.value,
-      capturedAt,
-      source,
-      symbology: inferred.symbology,
-      includeValue: options.includeValue === true,
-    }),
+    result: {
+      ok: true,
+      event: buildScanEvent({
+        normalizedValue: parsed.value,
+        normalizedHash,
+        capturedAt,
+        source,
+        symbology: inferred.symbology,
+        includeValue: options.includeValue === true,
+      }),
+    },
+    normalizedHash,
   };
 }
 
@@ -327,12 +369,14 @@ function validateEanCheckDigit(value: string): boolean {
 
 function buildScanEvent({
   normalizedValue,
+  normalizedHash,
   capturedAt,
   source,
   symbology,
   includeValue,
 }: {
   normalizedValue: string;
+  normalizedHash: string;
   capturedAt: string;
   source: ScanSource;
   symbology: ScanSymbology;
@@ -345,7 +389,7 @@ function buildScanEvent({
     source,
     symbology,
     valueLength: normalizedValue.length,
-    valueHashPrefix: hashPrefix(normalizedValue),
+    valueHashPrefix: hashPrefixFromHash(normalizedHash),
   };
   if (includeValue) {
     event.value = normalizedValue;
@@ -376,6 +420,10 @@ function buildValidationError({
   };
 }
 
-function hashPrefix(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8);
+function hashValue(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function hashPrefixFromHash(hash: string): string {
+  return hash.slice(0, 8);
 }

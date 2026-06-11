@@ -202,6 +202,25 @@ test('scanner bridge is narrow and does not expose device secrets', async () => 
   assert.doesNotMatch(renderer, /window\.open|location\.href|eval\(/);
 });
 
+test('scanner capture field masks raw wedge input and documents wedge-only mode', async () => {
+  const [html, renderer, main] = await Promise.all([
+    readSource('apps/desktop-agent/src/renderer/index.html'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+    readSource('apps/desktop-agent/src/main/main.ts'),
+  ]);
+
+  assert.match(html, /id="scanner-capture"[\s\S]*type="password"/);
+  assert.match(html, /data-raw-hidden="true"/);
+  assert.match(html, /Raw barcode values\s+are hidden by default/);
+  assert.match(html, /Current mode[\s\S]*Keyboard Wedge/);
+  assert.match(html, /Device selection[\s\S]*Not available in wedge mode/);
+  assert.match(html, /Detect HID scanner[\s\S]*Coming next/);
+  assert.match(html, /No native HID dependency is\s+included in this patch/);
+  assert.match(renderer, /clearScannerDevValue\(\)/);
+  assert.match(main, /JDA_SCANNER_DEV_SHOW_VALUE === 'true'/);
+  assert.doesNotMatch(main, /node-hid|WebHID|navigator\.hid/);
+});
+
 test('device status proxy does not expose scanner capture material', async () => {
   const proxy = await readSource('packages/agent-proxy/src/index.ts');
   const statusPathIndex = proxy.indexOf("path === '/device/status'");
