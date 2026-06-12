@@ -11,7 +11,12 @@
 
 import type { AgentHealth, DeviceRegistrationSnapshot } from '@jade-dev-agent/protocol';
 import type { ScanValidationErrorCode, ScanValidationResult } from '@jade-dev-agent/protocol';
-import type { AgentSnapshot, HardwareStatus } from '../preload/preload.cjs';
+import type {
+  AgentSnapshot,
+  HardwareStatus,
+  SafeScannerHidDevice,
+  ScannerCaptureStatus,
+} from '../preload/preload.cjs';
 
 interface ViewModel {
   registration: DeviceRegistrationSnapshot;
@@ -548,6 +553,145 @@ scannerInput?.addEventListener('keydown', (event) => {
   event.preventDefault();
   void validateScannerCapture();
 });
+
+// ─── Phase 3C — HID capture bench (presentation only) ──────────────
+//
+// Renders the SAFE projections the main process exposes: device names,
+// vendor/product ids, masked serials, and UPPER_SNAKE status codes.
+// Raw device paths, HID report bytes, and scan values never reach this
+// file. No timers — the bench updates on user actions only.
+
+const scannerCaptureMode = document.querySelector<HTMLElement>('#scanner-capture-mode');
+const scannerSelectedDevice = document.querySelector<HTMLElement>('#scanner-selected-device');
+const scannerHidDetectButton = document.querySelector<HTMLButtonElement>('#scanner-hid-detect');
+const scannerWedgeFallbackButton = document.querySelector<HTMLButtonElement>('#scanner-wedge-fallback');
+const scannerHidStatus = document.querySelector<HTMLElement>('#scanner-hid-status');
+const scannerHidDeviceList = document.querySelector<HTMLUListElement>('#scanner-hid-devices');
+
+const HID_REASON_COPY: Record<string, string> = {
+  HID_MODULE_UNAVAILABLE:
+    'Native HID support could not be loaded on this machine. Keyboard Wedge stays active.',
+  HID_ENUMERATION_FAILED:
+    'Could not list HID devices. Replug the scanner and detect again.',
+  HID_SELECTION_INVALID:
+    'That device selection is no longer valid. Detect devices again.',
+  HID_DEVICE_NOT_FOUND:
+    'Device not found — it may have been unplugged. Detect devices again.',
+  HID_OPEN_BLOCKED_OR_BUSY:
+    'Windows blocked opening this device (keyboard-class scanners are OS-claimed). Switch the scanner to HID-POS mode or stay on Keyboard Wedge.',
+  HID_OPEN_FAILED:
+    'Could not open this device. Check permissions or use Keyboard Wedge.',
+  HID_DEVICE_DISCONNECTED:
+    'The scanner disconnected. Reconnect it and detect again — Keyboard Wedge still works.',
+  HID_PREFERRED_DEVICE_ABSENT:
+    'The previously selected scanner is not connected. Keyboard Wedge stays active.',
+  HID_MULTIPLE_MATCHES:
+    'Several matching scanners are connected — detect devices and choose one manually.',
+};
+
+function hex4(value: number): string {
+  return value.toString(16).padStart(4, '0');
+}
+
+function renderCaptureStatus(status: ScannerCaptureStatus): void {
+  setText(
+    scannerCaptureMode,
+    status.mode === 'HID_RAW' ? 'HID Raw (focus-independent)' : 'Keyboard Wedge',
+  );
+  const device = status.selectedDevice;
+  setText(
+    scannerSelectedDevice,
+    device
+      ? `${device.product ?? 'HID device'} (${hex4(device.vendorId)}:${hex4(device.productId)})`
+      : 'None',
+  );
+  if (status.hidState === 'CAPTURING') {
+    setText(
+      scannerHidStatus,
+      'HID capture active — test scan now; scans route to POS even while JPPOS is focused.',
+    );
+    return;
+  }
+  if (status.hidReasonCode) {
+    setText(
+      scannerHidStatus,
+      HID_REASON_COPY[status.hidReasonCode] ?? `Not capturing (${status.hidReasonCode}).`,
+    );
+    return;
+  }
+  setText(
+    scannerHidStatus,
+    status.mode === 'WEDGE'
+      ? 'Keyboard Wedge mode — focus the capture field above to scan.'
+      : '',
+  );
+}
+
+function renderHidDeviceList(devices: SafeScannerHidDevice[]): void {
+  if (!scannerHidDeviceList) return;
+  scannerHidDeviceList.replaceChildren();
+  if (devices.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'small';
+    empty.textContent = 'No HID devices listed. Replug the scanner and detect again.';
+    scannerHidDeviceList.append(empty);
+    return;
+  }
+  for (const device of devices) {
+    const item = document.createElement('li');
+    item.className = 'hid-device-row';
+    const label = document.createElement('span');
+    const name = device.product ?? device.manufacturer ?? 'HID device';
+    const hints: string[] = [];
+    if (device.likelyScanner) hints.push('scanner');
+    if (device.keyboardClass) hints.push('keyboard-class');
+    if (device.serialMasked) hints.push(`SN ${device.serialMasked}`);
+    label.textContent = `${name} · ${hex4(device.vendorId)}:${hex4(device.productId)}${
+      hints.length > 0 ? ` · ${hints.join(' · ')}` : ''
+    }`;
+    const selectButton = document.createElement('button');
+    selectButton.type = 'button';
+    selectButton.className = 'secondary';
+    selectButton.textContent = device.keyboardClass
+      ? 'Try (often OS-blocked)'
+      : 'Use this scanner';
+    selectButton.addEventListener('click', () => {
+      const bridge = bridgeOrNull();
+      if (!bridge) return;
+      void bridge.selectScannerHidDevice(device.key).then((status) => {
+        renderCaptureStatus(status);
+      });
+    });
+    item.append(label, selectButton);
+    scannerHidDeviceList.append(item);
+  }
+}
+
+scannerHidDetectButton?.addEventListener('click', () => {
+  const bridge = bridgeOrNull();
+  if (!bridge) return;
+  setText(scannerHidStatus, 'Detecting HID devices…');
+  void bridge.listScannerHidDevices().then(async (devices) => {
+    renderHidDeviceList(devices);
+    renderCaptureStatus(await bridge.getScannerCaptureStatus());
+  });
+});
+
+scannerWedgeFallbackButton?.addEventListener('click', () => {
+  const bridge = bridgeOrNull();
+  if (!bridge) return;
+  void bridge.useScannerWedgeMode().then((status) => {
+    renderCaptureStatus(status);
+    scannerHidDeviceList?.replaceChildren();
+  });
+});
+
+{
+  const bridge = bridgeOrNull();
+  if (bridge) {
+    void bridge.getScannerCaptureStatus().then(renderCaptureStatus);
+  }
+}
 
 void refresh();
 

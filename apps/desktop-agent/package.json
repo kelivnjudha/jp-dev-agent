@@ -19,6 +19,7 @@
     "@jade-dev-agent/nfc-adapter": "0.1.0",
     "@jade-dev-agent/printer-adapter": "0.1.0",
     "@jade-dev-agent/protocol": "0.1.0",
-    "@jade-dev-agent/scanner-adapter": "0.1.0"
+    "@jade-dev-agent/scanner-adapter": "0.1.0",
+    "node-hid": "^3.3.0"
   }
 }

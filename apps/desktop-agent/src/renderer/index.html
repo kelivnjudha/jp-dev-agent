@@ -194,31 +194,33 @@
               <dl class="mode-grid">
                 <div>
                   <dt>Current mode</dt>
-                  <dd>Keyboard Wedge</dd>
+                  <dd id="scanner-capture-mode">Keyboard Wedge</dd>
                 </div>
                 <div>
-                  <dt>Device selection</dt>
-                  <dd>Not available in wedge mode</dd>
+                  <dt>Selected scanner</dt>
+                  <dd id="scanner-selected-device">None</dd>
                 </div>
               </dl>
               <p class="small">
-                Keyboard-wedge scanners act like a keyboard. To select a scanner
-                device directly, use a future HID mode.
+                HID raw capture reads the scanner directly in the main
+                process, so scans work while JPPOS is focused. Keyboard-wedge
+                scanners act like a keyboard and need this window focused.
               </p>
-              <button
-                id="scanner-hid-detect"
-                class="ghost future-control"
-                disabled
-                aria-disabled="true"
-                title="HID scanner selection is planned for a separate phase."
-              >
-                Detect HID scanner · Coming next
-              </button>
+              <div class="input-row">
+                <button id="scanner-hid-detect" class="secondary">
+                  Detect HID scanners
+                </button>
+                <button id="scanner-wedge-fallback" class="ghost">
+                  Use Keyboard Wedge
+                </button>
+              </div>
+              <p id="scanner-hid-status" class="small" role="status"></p>
+              <ul id="scanner-hid-devices" class="hid-device-list"></ul>
               <p class="small">
-                HID scanner selection requires WebHID or native HID integration.
-                It is a separate Phase 2 because it changes permissions,
-                dependencies, and the security model. No native HID dependency is
-                included in this patch.
+                Device names, vendor/product ids, and masked serials only —
+                raw HID reports and device paths never leave the agent core.
+                Windows keeps keyboard-class scanners for itself; switch the
+                scanner to HID-POS mode or stay on Keyboard Wedge.
               </p>
             </div>
 

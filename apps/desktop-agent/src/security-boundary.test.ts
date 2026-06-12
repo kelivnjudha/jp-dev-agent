@@ -315,7 +315,7 @@ test('scanner bridge is narrow and does not expose device secrets', async () => 
   assert.doesNotMatch(renderer, /window\.open|location\.href|eval\(/);
 });
 
-test('scanner capture field masks raw wedge input and documents wedge-only mode', async () => {
+test('scanner capture field masks raw wedge input and documents both modes', async () => {
   const [html, renderer, main] = await Promise.all([
     readSource('apps/desktop-agent/src/renderer/index.html'),
     readSource('apps/desktop-agent/src/renderer/renderer.ts'),
@@ -326,12 +326,60 @@ test('scanner capture field masks raw wedge input and documents wedge-only mode'
   assert.match(html, /data-raw-hidden="true"/);
   assert.match(html, /Raw barcode values\s+are hidden by default/);
   assert.match(html, /Current mode[\s\S]*Keyboard Wedge/);
-  assert.match(html, /Device selection[\s\S]*Not available in wedge mode/);
-  assert.match(html, /Detect HID scanner[\s\S]*Coming next/);
-  assert.match(html, /No native HID dependency is\s+included in this patch/);
+  assert.match(html, /id="scanner-hid-detect"/);
+  assert.match(html, /id="scanner-wedge-fallback"/);
   assert.match(renderer, /clearScannerDevValue\(\)/);
   assert.match(main, /JDA_SCANNER_DEV_SHOW_VALUE === 'true'/);
-  assert.doesNotMatch(main, /node-hid|WebHID|navigator\.hid/);
+  // WebHID stays banned everywhere; node-hid lives ONLY in the
+  // dedicated main-process capture module (asserted below).
+  assert.doesNotMatch(main, /WebHID|navigator\.hid/);
+  assert.doesNotMatch(main, /from 'node-hid'|import\('node-hid'\)/);
+});
+
+test('HID raw capture stays main-process only with redacted device metadata', async () => {
+  const [hidCapture, hidHelpers, preload, renderer, mainSource] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/hid-capture.ts'),
+    readSource('packages/hardware-adapters/scanner/src/hid.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+    readSource('apps/desktop-agent/src/main/main.ts'),
+  ]);
+
+  // node-hid is imported ONLY by the dedicated capture module, lazily.
+  assert.match(hidCapture, /import\('node-hid'\)/);
+  assert.doesNotMatch(preload, /node-hid|HIDAsync|devicesAsync|pushReport/);
+  assert.doesNotMatch(renderer, /node-hid|HIDAsync|devicesAsync|pushReport/);
+
+  // Raw report bytes flow assembler → shared validation only; the
+  // capture module never logs (no console at all) and never touches
+  // the renderer with report data.
+  assert.doesNotMatch(hidCapture, /console\./);
+  assert.match(hidCapture, /createHidKeyboardScanAssembler/);
+  assert.match(hidCapture, /projectSafeHidDeviceInfo/);
+
+  // HID scans enter the SAME validation pipeline as wedge captures.
+  assert.match(mainSource, /scannerAdapter\.validateInput\(assembled, 'HID'\)/);
+
+  // Discovery redaction: serials masked, raw paths reduced to a hash
+  // fragment inside the selection key; persistence keeps safe fields
+  // only (vendor/product/name — never path or serial).
+  assert.match(hidHelpers, /maskHidSerial/);
+  assert.match(hidHelpers, /sha256/);
+  assert.doesNotMatch(hidHelpers, /console\./);
+  assert.match(mainSource, /scanner-capture-preferences\.json/);
+  const persistIndex = mainSource.indexOf('function persistScannerCapturePreference');
+  const persistEnd = mainSource.indexOf('const hidCaptureManager', persistIndex);
+  assert.ok(persistIndex > -1 && persistEnd > persistIndex);
+  const persistBody = mainSource.slice(persistIndex, persistEnd);
+  // The persisted shape is the typed safe preference — vendor/product
+  // ids + display name. Raw device paths and serials never appear.
+  assert.match(persistBody, /vendorId: number; productId: number; product: string \| null/);
+  assert.doesNotMatch(persistBody, /serialNumber|raw\.path|device\.path|pathsByKey/);
+
+  // Scanned content is data, never code — no exec/open/eval anywhere
+  // in the capture path.
+  assert.doesNotMatch(hidCapture, /\bexec\(|\bspawn\(|\beval\(|child_process|openExternal/);
+  assert.doesNotMatch(hidHelpers, /\bexec\(|\bspawn\(|\beval\(|child_process|openExternal/);
 });
 
 test('scanner event delivery stays main-process only, origin-gated, and unlogged', async () => {

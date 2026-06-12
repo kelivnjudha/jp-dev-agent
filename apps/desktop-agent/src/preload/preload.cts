@@ -19,6 +19,34 @@ export interface HardwareStatus {
   scanner: ScannerStatus;
 }
 
+/** Phase 3C — safe HID bench shapes. The renderer only ever sees the
+ *  masked projections built in the main process: no raw device paths,
+ *  no full serials, no report bytes, no scan values. */
+export interface SafeScannerHidDevice {
+  key: string;
+  vendorId: number;
+  productId: number;
+  manufacturer: string | null;
+  product: string | null;
+  usagePage: number | null;
+  usage: number | null;
+  serialMasked: string | null;
+  keyboardClass: boolean;
+  likelyScanner: boolean;
+}
+
+export interface ScannerCaptureStatus {
+  mode: 'WEDGE' | 'HID_RAW';
+  hidSupported: boolean;
+  hidState: 'IDLE' | 'CAPTURING' | 'ERROR' | 'UNAVAILABLE';
+  hidReasonCode: string | null;
+  selectedDevice: {
+    vendorId: number;
+    productId: number;
+    product: string | null;
+  } | null;
+}
+
 const api = {
   getAgentStatus: (): Promise<AgentSnapshot> => ipcRenderer.invoke('agent:getSnapshot'),
   claimSetupCode: (
@@ -34,6 +62,14 @@ const api = {
     ipcRenderer.invoke('agent:getHardwareStatus'),
   validateScannerInput: (input: string): Promise<ScanValidationResult> =>
     ipcRenderer.invoke('agent:validateScannerInput', input),
+  listScannerHidDevices: (): Promise<SafeScannerHidDevice[]> =>
+    ipcRenderer.invoke('agent:listScannerHidDevices'),
+  selectScannerHidDevice: (key: string): Promise<ScannerCaptureStatus> =>
+    ipcRenderer.invoke('agent:selectScannerHidDevice', key),
+  useScannerWedgeMode: (): Promise<ScannerCaptureStatus> =>
+    ipcRenderer.invoke('agent:useScannerWedgeMode'),
+  getScannerCaptureStatus: (): Promise<ScannerCaptureStatus> =>
+    ipcRenderer.invoke('agent:getScannerCaptureStatus'),
 };
 
 contextBridge.exposeInMainWorld('jadeAgent', api);

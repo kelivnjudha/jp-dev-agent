@@ -198,6 +198,36 @@ not receive private keys, public keys, challenges, signatures, signing payloads,
 session tokens, full hardware fingerprint hashes, storage paths, or a general
 API client.
 
+## HID Raw Scanner Capture (Phase 3C)
+
+Focus-independent scan capture uses `node-hid` in the MAIN process only.
+Why node-hid: it is the maintained N-API (prebuilt, ABI-stable) HID
+library that runs main-process-side; WebHID would hand untrusted
+hardware input and device handles to the renderer — the inverse of this
+app's sandbox boundary. Serial capture, if ever needed, is a separate
+follow-up; one hardware dependency at a time.
+
+Rules:
+
+- Raw HID report bytes feed a pure keyboard-report assembler and are
+  dropped; they are never logged, persisted, or exposed over IPC.
+- Assembled candidates enter the SAME validation policy as wedge input
+  (length cap, printable charset, AIM prefix, EAN/UPC check digits,
+  duplicate debounce, rate limit) and the same delivery queue. There is
+  no second scan path.
+- Scanned content is data, never code: nothing executes, opens, or
+  renders it as HTML.
+- Device discovery exposes safe projections only: vendor/product ids,
+  product/manufacturer names, usage page/usage, MASKED serial; the raw
+  OS path never leaves the capture module (selection keys carry only a
+  hash fragment).
+- The persisted preference stores vendor/product ids + display name.
+  Restore refuses to auto-pick between ambiguous identical units
+  (`HID_MULTIPLE_MATCHES`) instead of silently capturing the wrong one.
+- Keyboard-class collections (usagePage 0x01 / usage 0x06) are usually
+  OS-claimed on Windows; open failures surface safe reason codes and
+  the wedge harness remains the fallback.
+
 ## Future POS Enforcement Flow
 
 Target flow:

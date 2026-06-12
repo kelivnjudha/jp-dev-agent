@@ -1,7 +1,13 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { readFile, writeFile } from 'node:fs/promises';
 import { networkInterfaces, platform, release } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  HidCaptureManager,
+  type ScannerCaptureMode,
+} from './hid-capture.js';
 
 import {
   BranchDeviceApiError,
@@ -60,7 +66,10 @@ import {
 } from '@jade-dev-agent/device-storage';
 import { PlaceholderNfcReaderAdapter } from '@jade-dev-agent/nfc-adapter';
 import { PlaceholderPrinterAdapter } from '@jade-dev-agent/printer-adapter';
-import { WedgeScannerHarnessAdapter } from '@jade-dev-agent/scanner-adapter';
+import {
+  parseScannerHidPreference,
+  WedgeScannerHarnessAdapter,
+} from '@jade-dev-agent/scanner-adapter';
 import type {
   AgentHealth,
   BranchDeviceSessionIssueResponse,
@@ -150,6 +159,47 @@ const scannerAdapter = new WedgeScannerHarnessAdapter({
     scannerEventQueue.push(event);
   },
 });
+
+// Phase 3C — focus-independent HID capture. Assembled HID scans run
+// through the SAME adapter (validation, debounce, rate limit, queue)
+// as wedge captures; only the event source differs. The persisted
+// preference carries safe fields only — never the OS path or serial.
+let scannerPreferencePath: string | null = null;
+
+function persistScannerCapturePreference(preference: {
+  mode: ScannerCaptureMode;
+  device: { vendorId: number; productId: number; product: string | null } | null;
+}): void {
+  if (!scannerPreferencePath) return;
+  void writeFile(
+    scannerPreferencePath,
+    JSON.stringify(preference, null, 2),
+    { encoding: 'utf8', mode: 0o600 },
+  ).catch(() => {
+    // Preference persistence is best-effort; capture keeps running.
+  });
+}
+
+const hidCaptureManager = new HidCaptureManager({
+  submitScan: (assembled) => {
+    void scannerAdapter.validateInput(assembled, 'HID');
+  },
+  persistPreference: persistScannerCapturePreference,
+});
+
+async function restoreScannerCapturePreference(): Promise<void> {
+  if (!scannerPreferencePath) return;
+  try {
+    const raw = await readFile(scannerPreferencePath, 'utf8');
+    const parsed = JSON.parse(raw) as { mode?: unknown; device?: unknown };
+    if (parsed.mode !== 'HID_RAW') return;
+    const preference = parseScannerHidPreference(parsed.device);
+    if (!preference) return;
+    await hidCaptureManager.restorePreference(preference);
+  } catch {
+    // No stored preference (or unreadable) — stay in wedge mode.
+  }
+}
 
 function getHealth(): AgentHealth {
   const unhealthyStatuses = new Set([
@@ -1182,6 +1232,9 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  scannerPreferencePath = join(userDataPath, 'scanner-capture-preferences.json');
+  void restoreScannerCapturePreference();
+
   createWindow();
   if (state.status === 'PENDING_ACTIVATION') {
     startActivationPolling(ACTIVATION_POLL_INITIAL_DELAY_MS);
@@ -1189,6 +1242,21 @@ async function bootstrap(): Promise<void> {
 }
 
 ipcMain.handle('agent:getSnapshot', () => getSnapshot());
+
+// Phase 3C — HID capture bench IPC. Renderer only ever receives the
+// safe projections (masked serial, hashed path key) and safe status
+// codes; raw paths, reports, and scan values stay in the main process.
+ipcMain.handle('agent:listScannerHidDevices', () =>
+  hidCaptureManager.listDevices());
+
+ipcMain.handle('agent:selectScannerHidDevice', (_event, key: unknown) =>
+  hidCaptureManager.selectDevice(key));
+
+ipcMain.handle('agent:useScannerWedgeMode', () =>
+  hidCaptureManager.useWedgeMode());
+
+ipcMain.handle('agent:getScannerCaptureStatus', () =>
+  hidCaptureManager.getStatus());
 
 ipcMain.handle('agent:claimSetupCode', async (_event, setupCode: unknown, deviceLabel: unknown) => {
   // Safe claim trace — event markers only; never the setup code, keys,
@@ -1304,6 +1372,7 @@ app.on('activate', () => {
 app.on('before-quit', (event) => {
   stopActivationPolling();
   stopHeartbeatLifecycle();
+  void hidCaptureManager.dispose();
   if (!proxy) return;
   event.preventDefault();
   const currentProxy = proxy;

@@ -1,3 +1,5 @@
+export * from './hid.js';
+
 import { createHash, randomUUID } from 'node:crypto';
 
 import type {
@@ -36,7 +38,7 @@ export interface SafeScannerLogEvent {
 }
 
 export interface ScannerAdapter {
-  validateInput(input: unknown): Promise<ScanValidationResult>;
+  validateInput(input: unknown, source?: ScanSource): Promise<ScanValidationResult>;
   getStatus(): Promise<ScannerStatus>;
 }
 
@@ -87,10 +89,13 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
 
   constructor(private readonly options: WedgeScannerHarnessOptions = {}) {}
 
-  async validateInput(input: unknown): Promise<ScanValidationResult> {
+  async validateInput(
+    input: unknown,
+    source: ScanSource = 'WEDGE',
+  ): Promise<ScanValidationResult> {
     const now = this.options.now?.() ?? new Date();
     const core = validateScanPayloadCore(input, {
-      source: 'WEDGE',
+      source,
       now,
       includeValue: this.options.includeValue === true,
     });
