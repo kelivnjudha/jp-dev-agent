@@ -9,6 +9,8 @@ import type {
   DeviceCapability,
   DeviceRegistrationSnapshot,
   PendingDeviceRegistrationState,
+  ScanSource,
+  ScanSymbology,
 } from '@jade-dev-agent/protocol';
 
 export type SetupCodeClaimErrorCode =
@@ -993,6 +995,139 @@ export function createSingleFlight<T>(task: () => Promise<T>): () => Promise<T> 
       });
     }
     return inFlight;
+  };
+}
+
+// ─── Scanner event queue (Phase 3B agent scan delivery) ───────────
+//
+// In-memory, bounded, TTL-pruned queue of ACCEPTED scans awaiting
+// delivery to the local JPPOS consumer over the loopback proxy.
+//
+// Privacy contract:
+//   • The raw scan `value` lives ONLY in this in-memory queue and only
+//     until delivered or expired (TTL). It is never persisted, never
+//     logged, and never reaches the agent renderer through this path.
+//   • Reads are cursor-based and non-destructive: a redelivery after a
+//     consumer reconnect returns the same events with the same scanId,
+//     so the consumer can dedupe deterministically.
+
+export interface ScannerQueueEvent {
+  type: 'SCAN';
+  scanId: string;
+  capturedAt: string;
+  source: ScanSource;
+  symbology: ScanSymbology;
+  /** Normalized raw scan value — present for delivery, in memory only. */
+  value: string;
+  valueLength: number;
+  valueHashPrefix: string;
+}
+
+export interface ScannerEventsBatch {
+  /** Cursor the consumer should send on its next poll. */
+  cursor: number;
+  events: ScannerQueueEvent[];
+}
+
+export interface ScannerEventQueueOptions {
+  ttlMs?: number;
+  maxEvents?: number;
+  now?: () => number;
+}
+
+export interface ScannerEventQueue {
+  /** Enqueue an accepted scan; returns its sequence number. */
+  push(event: ScannerQueueEvent): number;
+  /** All unexpired events with seq > cursor (non-destructive). */
+  listAfter(cursor: number): ScannerEventsBatch;
+  /** Long-poll variant: resolves immediately when events exist,
+   *  otherwise waits up to waitMs for the next push. */
+  waitForAfter(cursor: number, waitMs: number): Promise<ScannerEventsBatch>;
+  size(): number;
+}
+
+export function createScannerEventQueue({
+  ttlMs = 30_000,
+  maxEvents = 20,
+  now = () => Date.now(),
+}: ScannerEventQueueOptions = {}): ScannerEventQueue {
+  let nextSeq = 1;
+  const entries: Array<{
+    seq: number;
+    expiresAtMs: number;
+    event: ScannerQueueEvent;
+  }> = [];
+  const waiters = new Set<() => void>();
+
+  const prune = (): void => {
+    const cutoffMs = now();
+    while (entries.length > 0 && entries[0]!.expiresAtMs <= cutoffMs) {
+      entries.shift();
+    }
+    while (entries.length > maxEvents) {
+      entries.shift();
+    }
+  };
+
+  const listAfter = (cursor: number): ScannerEventsBatch => {
+    prune();
+    const latestSeq = entries.length > 0
+      ? entries[entries.length - 1]!.seq
+      : nextSeq - 1;
+    // A cursor ahead of everything we have ever issued means the agent
+    // restarted (sequence reset) — snap the consumer back to "caught
+    // up" instead of leaving it waiting for sequence numbers that will
+    // never arrive.
+    const effectiveCursor =
+      Number.isInteger(cursor) && cursor >= 0
+        ? Math.min(cursor, Math.max(latestSeq, 0))
+        : 0;
+    const delivered = entries.filter((entry) => entry.seq > effectiveCursor);
+    return {
+      cursor: delivered.length > 0
+        ? delivered[delivered.length - 1]!.seq
+        : effectiveCursor,
+      events: delivered.map((entry) => entry.event),
+    };
+  };
+
+  return {
+    push(event) {
+      prune();
+      const seq = nextSeq;
+      nextSeq += 1;
+      entries.push({ seq, expiresAtMs: now() + ttlMs, event });
+      while (entries.length > maxEvents) {
+        entries.shift();
+      }
+      for (const wake of [...waiters]) {
+        wake();
+      }
+      return seq;
+    },
+    listAfter,
+    async waitForAfter(cursor, waitMs) {
+      const immediate = listAfter(cursor);
+      if (immediate.events.length > 0 || waitMs <= 0) return immediate;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          waiters.delete(wake);
+          clearTimeout(timer);
+          resolve();
+        };
+        const wake = (): void => finish();
+        const timer = setTimeout(finish, waitMs);
+        waiters.add(wake);
+      });
+      return listAfter(cursor);
+    },
+    size() {
+      prune();
+      return entries.length;
+    },
   };
 }
 

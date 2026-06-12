@@ -334,6 +334,43 @@ test('scanner capture field masks raw wedge input and documents wedge-only mode'
   assert.doesNotMatch(main, /node-hid|WebHID|navigator\.hid/);
 });
 
+test('scanner event delivery stays main-process only, origin-gated, and unlogged', async () => {
+  const [main, proxy, preload, renderer] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('packages/agent-proxy/src/index.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+  ]);
+
+  // The queue lives in the main process and is fed only by the
+  // adapter's accepted-scan hook; the proxy treats the payload as
+  // opaque behind the same exact-origin allowlist as the proof path.
+  assert.match(main, /createScannerEventQueue\(\)/);
+  assert.match(main, /onAcceptedScan: \(event\) => \{/);
+  assert.match(main, /getScannerEvents: async \(\{ cursor, waitMs \}\)/);
+  assert.match(proxy, /SCANNER_EVENTS_ORIGIN_NOT_ALLOWED/);
+  assert.match(proxy, /consumeScannerEventsRateLimit/);
+  assert.match(proxy, /SCANNER_EVENTS_CURSOR_INVALID/);
+
+  // Scanner event delivery requires an ACTIVE POS_TERMINAL device.
+  const scannerGateIndex = main.indexOf('getScannerEvents: async');
+  const scannerGateGuard = main.indexOf("state.capabilities.includes('POS_TERMINAL')", scannerGateIndex);
+  assert.ok(scannerGateIndex > -1);
+  assert.ok(scannerGateGuard > scannerGateIndex);
+
+  // The accepted-scan delivery hook must not log: between the
+  // onAcceptedScan callback opening and its closing push there is no
+  // console call.
+  const hookIndex = main.indexOf('onAcceptedScan: (event) => {');
+  const hookEnd = main.indexOf('},', hookIndex);
+  assert.ok(hookIndex > -1 && hookEnd > hookIndex);
+  assert.equal(main.slice(hookIndex, hookEnd).includes('console.'), false);
+
+  // Renderer and preload have no access to the queue or the stream.
+  assert.doesNotMatch(preload, /scannerEventQueue|getScannerEvents|onAcceptedScan|scanner\/events/);
+  assert.doesNotMatch(renderer, /scannerEventQueue|getScannerEvents|onAcceptedScan|scanner\/events/);
+});
+
 test('device status proxy does not expose scanner capture material', async () => {
   const proxy = await readSource('packages/agent-proxy/src/index.ts');
   const statusPathIndex = proxy.indexOf("path === '/device/status'");

@@ -22,9 +22,12 @@ test('allowed proxy paths are exact and small', () => {
     '/device/status',
     '/proxy/test',
     '/pos/device-proof',
+    '/scanner/events',
   ]);
   assert.equal(isAllowedProxyPath('/proxy/test'), true);
   assert.equal(isAllowedProxyPath('/pos/device-proof'), true);
+  assert.equal(isAllowedProxyPath('/scanner/events'), true);
+  assert.equal(isAllowedProxyPath('/scanner/events/anything'), false);
   assert.equal(isAllowedProxyPath('/proxy/test/anything'), false);
   assert.equal(isAllowedProxyPath('/http://example.com'), false);
 });
@@ -38,6 +41,9 @@ test('proxy URL parsing rejects absolute and protocol-relative request targets',
 
 async function withProxyServer<T>(
   run: (baseUrl: string) => Promise<T>,
+  overrides: {
+    getScannerEvents?: (query: { cursor: number; waitMs: number }) => Promise<unknown>;
+  } = {},
 ): Promise<T> {
   const server = createAgentProxyServer({
     getHealth: () => ({
@@ -66,6 +72,7 @@ async function withProxyServer<T>(
       proof: 'aaaaaaaa.bbbbbbbb.cccccccc',
       expiresAt: new Date('2026-06-11T10:01:00.000Z').toISOString(),
     }),
+    ...overrides,
   });
   await new Promise<void>((resolve) => server.listen(0, DEFAULT_PROXY_HOST, resolve));
   const address = server.address();
@@ -122,5 +129,111 @@ test('POS device proof endpoint rate limits after 30 requests per minute', async
     assert.equal(response.status, 429);
     const body = await response.json();
     assert.equal(body.code, 'POS_DEVICE_PROOF_RATE_LIMITED');
+  });
+});
+
+test('scanner events endpoint requires the exact allowed origin', async () => {
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  await withProxyServer(async (baseUrl) => {
+    const denied = await fetch(`${baseUrl}/scanner/events?cursor=0`, {
+      headers: { origin: 'http://evil.test' },
+    });
+    assert.equal(denied.status, 403);
+    assert.notEqual(denied.headers.get('access-control-allow-origin'), '*');
+    const deniedBody = await denied.json();
+    assert.equal(deniedBody.code, 'SCANNER_EVENTS_ORIGIN_NOT_ALLOWED');
+
+    const noOrigin = await fetch(`${baseUrl}/scanner/events?cursor=0`);
+    assert.equal(noOrigin.status, 403);
+  }, {
+    getScannerEvents: async () => ({ cursor: 0, events: [] }),
+  });
+});
+
+test('scanner events endpoint passes cursor through and returns the opaque payload', async () => {
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  const seenQueries: Array<{ cursor: number; waitMs: number }> = [];
+  await withProxyServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/scanner/events?cursor=7&waitMs=9999`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:3002');
+    const body = await response.json();
+    assert.deepEqual(body, { cursor: 9, events: [{ type: 'SCAN', scanId: 'x' }] });
+    assert.deepEqual(seenQueries, [{ cursor: 7, waitMs: 1500 }], 'waitMs is capped at 1500');
+  }, {
+    getScannerEvents: async (query) => {
+      seenQueries.push(query);
+      return { cursor: 9, events: [{ type: 'SCAN', scanId: 'x' }] };
+    },
+  });
+});
+
+test('scanner events endpoint rejects malformed cursors and missing providers safely', async () => {
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  await withProxyServer(async (baseUrl) => {
+    const badCursor = await fetch(`${baseUrl}/scanner/events?cursor=abc`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(badCursor.status, 400);
+    assert.equal((await badCursor.json()).code, 'SCANNER_EVENTS_CURSOR_INVALID');
+  }, {
+    getScannerEvents: async () => ({ cursor: 0, events: [] }),
+  });
+
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  await withProxyServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/scanner/events?cursor=0`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, 'SCANNER_EVENTS_UNAVAILABLE');
+  });
+});
+
+test('scanner events endpoint maps provider readiness failures to safe 423 codes', async () => {
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  await withProxyServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/scanner/events?cursor=0`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(response.status, 423);
+    const body = await response.json();
+    assert.equal(body.code, 'POS_DEVICE_NOT_ACTIVE');
+  }, {
+    getScannerEvents: async () => {
+      throw new Error('POS_DEVICE_NOT_ACTIVE');
+    },
+  });
+});
+
+test('scanner events endpoint has its own rate limit bucket', async () => {
+  __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits.clear();
+  __INTERNAL_AGENT_PROXY_TESTING.posProofRateLimits.clear();
+  await withProxyServer(async (baseUrl) => {
+    // Pre-fill the scanner bucket to its cap, then expect 429 — without
+    // looping 240 live requests.
+    const buckets = __INTERNAL_AGENT_PROXY_TESTING.scannerEventsRateLimits;
+    const probe = await fetch(`${baseUrl}/scanner/events?cursor=0`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(probe.status, 200);
+    for (const bucket of buckets.values()) {
+      bucket.count = 240;
+    }
+    const limited = await fetch(`${baseUrl}/scanner/events?cursor=0`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(limited.status, 429);
+    assert.equal((await limited.json()).code, 'SCANNER_EVENTS_RATE_LIMITED');
+
+    // The proof endpoint is unaffected by the scanner bucket.
+    const proof = await fetch(`${baseUrl}/pos/device-proof?binding=${'a'.repeat(43)}`, {
+      headers: { origin: 'http://127.0.0.1:3002' },
+    });
+    assert.equal(proof.status, 200);
+  }, {
+    getScannerEvents: async () => ({ cursor: 0, events: [] }),
   });
 });

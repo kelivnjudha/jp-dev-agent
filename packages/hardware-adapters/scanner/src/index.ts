@@ -44,6 +44,13 @@ export interface WedgeScannerHarnessOptions {
   includeValue?: boolean;
   now?: () => Date;
   safeLog?: (event: SafeScannerLogEvent) => void;
+  /** Main-process-only delivery hook. Fires AFTER debounce + rate
+   *  limiting accept a scan, with the normalized raw value attached —
+   *  independent of `includeValue`, which only gates the value in the
+   *  renderer-facing validation result. The callback must never log
+   *  or persist the value (Phase 3B queues it in memory for local
+   *  JPPOS delivery). */
+  onAcceptedScan?: (event: ScanEvent & { value: string }) => void;
 }
 
 interface ParsedCapture {
@@ -54,6 +61,7 @@ interface ParsedCapture {
 interface ScanCore {
   result: ScanValidationResult;
   normalizedHash: string | null;
+  normalizedValue: string | null;
 }
 
 interface AcceptedScanCore {
@@ -95,6 +103,16 @@ export class WedgeScannerHarnessAdapter implements ScannerAdapter {
 
     this.updateStatus(result);
     this.options.safeLog?.(buildSafeScannerLogEvent(result));
+    // Delivery hook — accepted scans only (duplicates and rate-limited
+    // captures never reach it). The renderer-facing `result` keeps its
+    // includeValue gating; the normalized value rides only on this
+    // main-process callback.
+    if (result.ok && core.normalizedValue) {
+      this.options.onAcceptedScan?.({
+        ...result.event,
+        value: core.normalizedValue,
+      });
+    }
     return result;
   }
 
@@ -187,6 +205,7 @@ function validateScanPayloadCore(
         valueHashPrefix: null,
       }),
       normalizedHash: null,
+      normalizedValue: null,
     };
   }
 
@@ -201,6 +220,7 @@ function validateScanPayloadCore(
         valueHashPrefix: hashPrefixFromHash(normalizedHash),
       }),
       normalizedHash,
+      normalizedValue: null,
     };
   }
 
@@ -215,6 +235,7 @@ function validateScanPayloadCore(
         valueHashPrefix: hashPrefixFromHash(normalizedHash),
       }),
       normalizedHash,
+      normalizedValue: null,
     };
   }
 
@@ -229,6 +250,7 @@ function validateScanPayloadCore(
         valueHashPrefix: hashPrefixFromHash(normalizedHash),
       }),
       normalizedHash,
+      normalizedValue: null,
     };
   }
 
@@ -243,6 +265,7 @@ function validateScanPayloadCore(
         valueHashPrefix: null,
       }),
       normalizedHash: null,
+      normalizedValue: null,
     };
   }
 
@@ -258,6 +281,7 @@ function validateScanPayloadCore(
         valueHashPrefix: hashPrefixFromHash(normalizedHash),
       }),
       normalizedHash,
+      normalizedValue: null,
     };
   }
 
@@ -274,6 +298,7 @@ function validateScanPayloadCore(
       }),
     },
     normalizedHash,
+    normalizedValue: parsed.value,
   };
 }
 

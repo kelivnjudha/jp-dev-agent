@@ -203,3 +203,69 @@ test('raw value is hidden by default and only present when dev flag requests it'
   assert.equal(dev.ok, true);
   if (dev.ok) assert.equal(dev.event.value, 'JP-SKU-DEV-GATED');
 });
+
+
+// ─── Phase 3B — onAcceptedScan delivery hook ──────────────────────
+
+test('onAcceptedScan fires with the normalized value while the renderer result stays masked', async () => {
+  const delivered: Array<{ scanId: string; value: string; symbology: string }> = [];
+  const adapter = new WedgeScannerHarnessAdapter({
+    includeValue: false,
+    now: () => new Date('2026-06-12T09:00:00.000Z'),
+    onAcceptedScan: (event) => {
+      delivered.push({
+        scanId: event.scanId,
+        value: event.value,
+        symbology: event.symbology,
+      });
+    },
+  });
+
+  const result = await adapter.validateInput(']E05901234123457');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Renderer-facing result: value stays gated by includeValue.
+  assert.equal(result.event.value, undefined);
+  // Delivery hook: AIM prefix stripped, normalized value attached.
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0]?.value, '5901234123457');
+  assert.equal(delivered[0]?.symbology, 'EAN13');
+  assert.equal(delivered[0]?.scanId, result.event.scanId);
+});
+
+test('onAcceptedScan does not fire for rejected scans', async () => {
+  let fired = 0;
+  const adapter = new WedgeScannerHarnessAdapter({
+    now: () => new Date('2026-06-12T09:00:00.000Z'),
+    onAcceptedScan: () => {
+      fired += 1;
+    },
+  });
+
+  const badCheckDigit = await adapter.validateInput('5901234123458');
+  assert.equal(badCheckDigit.ok, false);
+  const empty = await adapter.validateInput('   ');
+  assert.equal(empty.ok, false);
+  assert.equal(fired, 0);
+});
+
+test('onAcceptedScan does not fire for debounced duplicates', async () => {
+  let nowMs = Date.parse('2026-06-12T09:00:00.000Z');
+  let fired = 0;
+  const adapter = new WedgeScannerHarnessAdapter({
+    now: () => new Date(nowMs),
+    onAcceptedScan: () => {
+      fired += 1;
+    },
+  });
+
+  const first = await adapter.validateInput('5901234123457');
+  assert.equal(first.ok, true);
+  nowMs += 200; // inside the 1s duplicate window
+  const duplicate = await adapter.validateInput('5901234123457');
+  assert.equal(duplicate.ok, false);
+  if (!duplicate.ok) {
+    assert.equal(duplicate.code, 'SCAN_DUPLICATE');
+  }
+  assert.equal(fired, 1);
+});

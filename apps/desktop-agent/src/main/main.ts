@@ -17,6 +17,7 @@ import {
   createInitialAgentState,
   createInitialAgentStateFromPending,
   createPendingActivationState,
+  createScannerEventQueue,
   createSingleFlight,
   disableDevice,
   evaluatePosDeviceProofReadiness,
@@ -131,6 +132,11 @@ let malformedExpiryRecoveryAttempted = false;
 
 const printerAdapter = new PlaceholderPrinterAdapter();
 const nfcAdapter = new PlaceholderNfcReaderAdapter();
+// Phase 3B — accepted scans are queued in memory (TTL 30s, last 20)
+// for delivery to the local JPPOS consumer over the loopback proxy.
+// The raw value lives only in this queue; it is never logged or
+// persisted, and never crosses to the agent renderer through it.
+const scannerEventQueue = createScannerEventQueue();
 const scannerAdapter = new WedgeScannerHarnessAdapter({
   includeValue:
     process.env.NODE_ENV !== 'production'
@@ -139,6 +145,9 @@ const scannerAdapter = new WedgeScannerHarnessAdapter({
     if (process.env.NODE_ENV === 'production') return;
     // Safe metadata only: no raw barcode, secrets, setup codes, or payload bodies.
     console.info('[scanner]', event);
+  },
+  onAcceptedScan: (event) => {
+    scannerEventQueue.push(event);
   },
 });
 
@@ -1152,6 +1161,19 @@ async function bootstrap(): Promise<void> {
     getHealth,
     getDeviceStatus: () => toRegistrationSnapshot(state),
     getPosDeviceProof: issueLocalPosDeviceProof,
+    // Phase 3B — scanner event delivery. Gated on an ACTIVE device with
+    // the POS_TERMINAL capability; everything stricter (proof, session,
+    // heartbeat freshness) is enforced per-request by the API when the
+    // routed scan actually calls a cashier endpoint.
+    getScannerEvents: async ({ cursor, waitMs }) => {
+      if (
+        state.status !== 'ACTIVE'
+        || !state.capabilities.includes('POS_TERMINAL')
+      ) {
+        throw new Error('POS_DEVICE_NOT_ACTIVE');
+      }
+      return scannerEventQueue.waitForAfter(cursor, waitMs);
+    },
     allowedPosOrigin: resolveJpposAllowedOrigin(),
     safeLog: (event) => {
       if (process.env.NODE_ENV === 'production') return;

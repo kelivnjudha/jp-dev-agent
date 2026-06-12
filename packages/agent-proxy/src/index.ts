@@ -10,6 +10,7 @@ export const ALLOWED_PROXY_PATHS = [
   '/device/status',
   '/proxy/test',
   '/pos/device-proof',
+  '/scanner/events',
 ] as const;
 
 export type AllowedProxyPath = (typeof ALLOWED_PROXY_PATHS)[number];
@@ -19,8 +20,19 @@ export interface AgentProxyOptions {
   getHealth: () => AgentHealth;
   getDeviceStatus: () => DeviceRegistrationSnapshot;
   getPosDeviceProof?: (binding: string) => Promise<PosDeviceProofResponse>;
+  /** Phase 3B — cursor-based scanner event delivery for the local POS
+   *  consumer. The proxy treats the payload as OPAQUE: the queue shape
+   *  (and its raw values) is owned by the main process, and this layer
+   *  never inspects, logs, or persists it. Throwing an UPPER_SNAKE
+   *  error message surfaces as a safe 423 readiness code. */
+  getScannerEvents?: (query: ScannerEventsQuery) => Promise<unknown>;
   allowedPosOrigin?: string | null;
   safeLog?: (event: ProxyLogEvent) => void;
+}
+
+export interface ScannerEventsQuery {
+  cursor: number;
+  waitMs: number;
 }
 
 export interface PosDeviceProofResponse {
@@ -44,6 +56,15 @@ const POS_PROOF_RATE_LIMIT_WINDOW_MS = 60_000;
 const POS_PROOF_RATE_LIMIT_MAX = 30;
 const POS_PROOF_BINDING_RE = /^[A-Za-z0-9_-]{32,128}$/u;
 const posProofRateLimits = new Map<string, { count: number; resetAt: number }>();
+
+// Scanner event polling is long-poll paced (~1 request/second while the
+// cashier is open), so it gets its own, more generous bucket than the
+// proof endpoint. Still bounded: a runaway client cannot spin the CPU.
+const SCANNER_EVENTS_RATE_LIMIT_WINDOW_MS = 60_000;
+const SCANNER_EVENTS_RATE_LIMIT_MAX = 240;
+const SCANNER_EVENTS_MAX_WAIT_MS = 1_500;
+const SCANNER_EVENTS_CURSOR_RE = /^\d{1,12}$/u;
+const scannerEventsRateLimits = new Map<string, { count: number; resetAt: number }>();
 
 export function isAllowedProxyPath(pathname: string): pathname is AllowedProxyPath {
   return (ALLOWED_PROXY_PATHS as readonly string[]).includes(pathname);
@@ -126,20 +147,43 @@ function resolveAllowedPosOrigin(
   return { ok: true, headers: corsHeadersForPosProof(origin) };
 }
 
-function consumePosProofRateLimit(req: IncomingMessage): boolean {
+function consumeRateLimit(
+  limits: Map<string, { count: number; resetAt: number }>,
+  req: IncomingMessage,
+  windowMs: number,
+  max: number,
+): boolean {
   const key = req.socket.remoteAddress || 'unknown';
   const now = Date.now();
-  const current = posProofRateLimits.get(key);
+  const current = limits.get(key);
   if (!current || current.resetAt <= now) {
-    posProofRateLimits.set(key, {
+    limits.set(key, {
       count: 1,
-      resetAt: now + POS_PROOF_RATE_LIMIT_WINDOW_MS,
+      resetAt: now + windowMs,
     });
     return true;
   }
-  if (current.count >= POS_PROOF_RATE_LIMIT_MAX) return false;
+  if (current.count >= max) return false;
   current.count += 1;
   return true;
+}
+
+function consumePosProofRateLimit(req: IncomingMessage): boolean {
+  return consumeRateLimit(
+    posProofRateLimits,
+    req,
+    POS_PROOF_RATE_LIMIT_WINDOW_MS,
+    POS_PROOF_RATE_LIMIT_MAX,
+  );
+}
+
+function consumeScannerEventsRateLimit(req: IncomingMessage): boolean {
+  return consumeRateLimit(
+    scannerEventsRateLimits,
+    req,
+    SCANNER_EVENTS_RATE_LIMIT_WINDOW_MS,
+    SCANNER_EVENTS_RATE_LIMIT_MAX,
+  );
 }
 
 function safeProxyErrorCode(error: unknown): string {
@@ -269,6 +313,101 @@ async function handleRequest(
       return;
     }
 
+    if (path === '/scanner/events') {
+      const cors = resolveAllowedPosOrigin(req, options.allowedPosOrigin);
+      if (!cors.ok) {
+        statusCode = 403;
+        writeJson(res, statusCode, {
+          code: 'SCANNER_EVENTS_ORIGIN_NOT_ALLOWED',
+          message: 'This POS origin is not allowed.',
+        });
+        return;
+      }
+      if (req.method === 'OPTIONS') {
+        statusCode = 204;
+        writeEmpty(res, statusCode, cors.headers);
+        return;
+      }
+      if (req.method !== 'GET') {
+        statusCode = 405;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'AGENT_PROXY_METHOD_NOT_ALLOWED',
+            message: 'This method is not allowed on the local agent path.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      if (!consumeScannerEventsRateLimit(req)) {
+        statusCode = 429;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'SCANNER_EVENTS_RATE_LIMITED',
+            message: 'Scanner event requests are rate limited.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      const url = new URL(rawUrl, `http://${DEFAULT_PROXY_HOST}`);
+      const rawCursor = url.searchParams.get('cursor') ?? '0';
+      if (!SCANNER_EVENTS_CURSOR_RE.test(rawCursor)) {
+        statusCode = 400;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'SCANNER_EVENTS_CURSOR_INVALID',
+            message: 'Scanner event cursor is invalid.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      const rawWaitMs = url.searchParams.get('waitMs') ?? '0';
+      const waitMs = SCANNER_EVENTS_CURSOR_RE.test(rawWaitMs)
+        ? Math.min(Number.parseInt(rawWaitMs, 10), SCANNER_EVENTS_MAX_WAIT_MS)
+        : 0;
+      if (!options.getScannerEvents) {
+        statusCode = 503;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: 'SCANNER_EVENTS_UNAVAILABLE',
+            message: 'Scanner events are unavailable.',
+          },
+          cors.headers,
+        );
+        return;
+      }
+      try {
+        const payload = await options.getScannerEvents({
+          cursor: Number.parseInt(rawCursor, 10),
+          waitMs,
+        });
+        statusCode = 200;
+        writeJson(res, statusCode, payload, cors.headers);
+      } catch (error) {
+        statusCode = 423;
+        writeJson(
+          res,
+          statusCode,
+          {
+            code: safeProxyErrorCode(error),
+            message: 'Scanner events are not ready.',
+          },
+          cors.headers,
+        );
+      }
+      return;
+    }
+
     if (path === '/health' && req.method === 'GET') {
       statusCode = 200;
       writeJson(res, statusCode, options.getHealth());
@@ -332,6 +471,7 @@ export function createAgentProxyServer(options: AgentProxyOptions): Server {
 
 export const __INTERNAL_AGENT_PROXY_TESTING = {
   posProofRateLimits,
+  scannerEventsRateLimits,
 };
 
 export async function startAgentProxy(options: AgentProxyOptions): Promise<RunningAgentProxy> {
