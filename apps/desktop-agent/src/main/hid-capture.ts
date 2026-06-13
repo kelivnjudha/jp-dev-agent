@@ -13,6 +13,22 @@
 // POS scanners can be switched to "HID POS / serial-over-HID" modes
 // (usagePage 0x8C) which open fine.
 //
+// Phase 3F — native-crash containment. RAW HID is EXPERIMENTAL and
+// opt-in: node-hid's Windows backend can abort the whole process with a
+// native N-API assertion (hid_winapi_descriptor_reconstruct_pp_data /
+// napi_call_threadsafe_function) that no JS try/catch can intercept.
+// So this module:
+//   • imports/opens node-hid ONLY when the feature is enabled
+//     (`hidEnabled()` — driven by JDA_HID_SCANNER_ENABLED, default off);
+//     while disabled the native addon is never loaded → zero crash
+//     surface, and the keyboard-wedge fallback stays the default;
+//   • brackets every device open with a crash marker (written before
+//     open, cleared after a clean close) so a prior abort disables RAW
+//     HID on the next launch instead of crash-looping;
+//   • invalidates in-flight 'data'/'error' callbacks before close and
+//     after dispose (capture-generation guard) so a late native edge
+//     can't touch torn-down state or enqueue a scan after teardown.
+//
 // Privacy/security:
 //   • Raw OS device paths and full serial numbers never leave this
 //     module — discovery results go through projectSafeHidDeviceInfo.
@@ -23,6 +39,8 @@
 //     rate limiting, and the Phase 3B delivery queue.
 //   • Scanned content is data, never code: nothing here (or downstream)
 //     executes, opens, or renders scanned values.
+//   • The crash marker is a fixed string — never a path, serial, or
+//     any device identifier.
 
 import {
   createHidKeyboardScanAssembler,
@@ -43,10 +61,20 @@ export type HidCaptureState =
 
 export type ScannerCaptureSource = 'HID' | 'WEDGE';
 
+/** Why RAW HID is unavailable, so the bench can show the right copy.
+ *  `FLAG_DISABLED` — the operator never opted into the experimental
+ *  feature (JDA_HID_SCANNER_ENABLED is not true).
+ *  `PRIOR_CRASH` — a crash marker from a previous launch was found, so
+ *  RAW HID is held down for this launch as a safety cool-off. */
+export type HidDisabledReason = 'FLAG_DISABLED' | 'PRIOR_CRASH';
+
 /** Safe, renderer-visible status. Never contains paths, serials,
  *  report bytes, or scan values. */
 export interface ScannerCaptureStatus {
   mode: ScannerCaptureMode;
+  /** RAW HID is opt-in + experimental: true only when the feature flag
+   *  is on AND no prior-crash marker is holding it down this launch. */
+  hidEnabled: boolean;
   hidSupported: boolean;
   hidState: HidCaptureState;
   /** UPPER_SNAKE reason code when not capturing; human copy stays in
@@ -65,6 +93,10 @@ export interface ScannerCaptureStatus {
 interface NodeHidDeviceLike {
   on(event: 'data', listener: (data: Buffer) => void): void;
   on(event: 'error', listener: (error: unknown) => void): void;
+  /** EventEmitter teardown — used to detach listeners BEFORE close so a
+   *  late native callback can't fire into a half-closed handle. Optional
+   *  so the structural type stays minimal. */
+  removeAllListeners?(event?: 'data' | 'error'): void;
   close(): Promise<void> | void;
 }
 
@@ -91,6 +123,22 @@ export interface HidCaptureManagerOptions {
   /** Watchdog timer injection for tests; default global setTimeout. */
   setTimer?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
+  /** Live gate for the experimental RAW HID feature. Evaluated every
+   *  time the manager would import or open node-hid, so the decision can
+   *  be resolved after construction (the flag + crash marker are read
+   *  during app bootstrap). Defaults to OFF — node-hid is never touched
+   *  unless this returns true. */
+  hidEnabled?: () => boolean;
+  /** Why RAW HID is off (only consulted while `hidEnabled()` is false),
+   *  so the bench shows "disabled" vs "disabled after a crash". */
+  hidDisabledReason?: () => HidDisabledReason;
+  /** Crash-marker side effects (the file I/O lives in main so this
+   *  module stays pure + testable). `markOpenInProgress` is invoked
+   *  synchronously right before a native open; `clearOpenMarker` after
+   *  the handle is cleanly closed (or the open failed without aborting).
+   *  A surviving marker on next launch signals a prior native crash. */
+  markOpenInProgress?: () => void;
+  clearOpenMarker?: () => void;
 }
 
 // Watchdog reconnect backoff (ms): 2s → 5s → 10s → 30s (then 30s).
@@ -118,6 +166,13 @@ export class HidCaptureManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private reconnecting = false;
+  // Bumped on every open and on every close/dispose. Each device's
+  // 'data'/'error' listeners capture the generation they were attached
+  // at and drop their event if it no longer matches — so a late native
+  // callback (after close, after dispose, or from a superseded handle)
+  // cannot enqueue a scan or schedule a reconnect into torn-down state.
+  private captureGeneration = 0;
+  private disposed = false;
   private readonly setTimer: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearTimer: (handle: ReturnType<typeof setTimeout>) => void;
 
@@ -127,7 +182,23 @@ export class HidCaptureManager {
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
   }
 
+  /** Whether the experimental RAW HID feature is permitted right now.
+   *  Secure default: OFF unless the host explicitly opts in. */
+  private isHidEnabled(): boolean {
+    return this.options.hidEnabled?.() ?? false;
+  }
+
+  /** Reason code for the disabled state, mapped to the bench copy. */
+  private disabledReasonCode(): string {
+    const reason = this.options.hidDisabledReason?.() ?? 'FLAG_DISABLED';
+    return reason === 'PRIOR_CRASH' ? 'HID_DISABLED_AFTER_CRASH' : 'HID_DISABLED';
+  }
+
   private async loadHid(): Promise<NodeHidModuleLike | null> {
+    // Never import the native addon while the feature is disabled — this
+    // is the core of the crash containment: an addon that is never loaded
+    // cannot abort the process.
+    if (!this.isHidEnabled()) return null;
     if (this.moduleUnavailable) return null;
     try {
       this.modulePromise ??= (this.options.loadModule ?? defaultLoadModule)();
@@ -140,10 +211,14 @@ export class HidCaptureManager {
   }
 
   getStatus(): ScannerCaptureStatus {
-    const hidActive = this.mode === 'HID_RAW' && this.hidState === 'CAPTURING';
+    const enabled = this.isHidEnabled();
+    const hidActive =
+      enabled && this.mode === 'HID_RAW' && this.hidState === 'CAPTURING';
     return {
       mode: this.mode,
-      hidSupported: !this.moduleUnavailable,
+      hidEnabled: enabled,
+      // Supported = opted-in AND the native module actually loaded.
+      hidSupported: enabled && !this.moduleUnavailable,
       hidState: this.hidState,
       hidReasonCode: this.hidReasonCode,
       selectedDevice: this.selectedDevice,
@@ -158,6 +233,13 @@ export class HidCaptureManager {
   /** Enumerate HID devices as safe projections (masked serial, hashed
    *  path key). Also refreshes the key→path map used by select(). */
   async listDevices(): Promise<SafeHidDeviceInfo[]> {
+    if (!this.isHidEnabled()) {
+      // Disabled: do not enumerate (which would load node-hid). Wedge
+      // stays the ready capture path.
+      this.hidState = 'IDLE';
+      this.hidReasonCode = this.disabledReasonCode();
+      return [];
+    }
     const hid = await this.loadHid();
     if (!hid) {
       this.hidState = 'UNAVAILABLE';
@@ -199,6 +281,12 @@ export class HidCaptureManager {
    *  and switch to HID_RAW capture. A manual select cancels any active
    *  reconnect watchdog and resets its backoff. */
   async selectDevice(key: unknown): Promise<ScannerCaptureStatus> {
+    if (!this.isHidEnabled() || this.disposed) {
+      // Experimental RAW HID is off (or the manager is torn down) — never
+      // open a device. Stay on the wedge fallback.
+      this.hidReasonCode = this.disabledReasonCode();
+      return this.getStatus();
+    }
     if (typeof key !== 'string' || !/^[0-9a-f]{4}:[0-9a-f]{4}:[0-9a-f]{8}$/u.test(key)) {
       this.hidReasonCode = 'HID_SELECTION_INVALID';
       return this.getStatus();
@@ -231,10 +319,18 @@ export class HidCaptureManager {
 
     await this.closeOpenDevice();
 
+    // Mark BEFORE the native open: if node-hid aborts the process inside
+    // open()/descriptor reconstruction, this marker survives to the next
+    // launch and holds RAW HID down. Written synchronously by the host.
+    this.options.markOpenInProgress?.();
+
     let device: NodeHidDeviceLike;
     try {
       device = await hid.HIDAsync.open(path);
     } catch {
+      // Open failed but the process survived — not a crash; release the
+      // marker so it doesn't falsely trip the next launch.
+      this.options.clearOpenMarker?.();
       this.hidState = 'ERROR';
       // Keyboard-class devices are usually OS-claimed on Windows —
       // give the UI the precise reason so it can suggest HID-POS mode
@@ -244,17 +340,27 @@ export class HidCaptureManager {
       return this.getStatus();
     }
 
+    // This handle's callbacks are valid only while the generation holds.
+    const generation = ++this.captureGeneration;
+    const isCurrent = (): boolean =>
+      !this.disposed && generation === this.captureGeneration;
+
     const assembler = createHidKeyboardScanAssembler({
       onScan: (assembled) => {
+        if (!isCurrent()) return;
         this.options.submitScan(assembled);
       },
     });
     device.on('data', (data) => {
+      // Drop late reports from a closed/superseded handle.
+      if (!isCurrent()) return;
       assembler.pushReport(data);
     });
     device.on('error', () => {
       // Device unplugged or read failure — close and let the watchdog
       // retry with backoff; the wedge harness keeps working meanwhile.
+      // Ignore the edge entirely if this handle is no longer current.
+      if (!isCurrent()) return;
       void this.handleHidDisconnect();
     });
 
@@ -271,6 +377,7 @@ export class HidCaptureManager {
 
   private async handleHidDisconnect(): Promise<void> {
     await this.closeOpenDevice();
+    if (this.disposed || !this.isHidEnabled()) return; // torn down / disabled
     if (this.mode !== 'HID_RAW') return; // operator switched to wedge
     this.hidState = 'RECONNECTING';
     this.hidReasonCode = 'HID_DEVICE_DISCONNECTED';
@@ -279,6 +386,7 @@ export class HidCaptureManager {
   }
 
   private scheduleReconnect(): void {
+    if (this.disposed || !this.isHidEnabled()) return;
     if (this.reconnectTimer !== null || this.mode !== 'HID_RAW') return;
     const index = Math.min(
       this.reconnectAttempt,
@@ -294,7 +402,7 @@ export class HidCaptureManager {
   /** One reconnect tick: re-discover, and re-open the saved scanner if
    *  a single unambiguous match is present; otherwise back off. */
   async attemptReconnect(): Promise<ScannerCaptureStatus> {
-    if (this.mode !== 'HID_RAW' || !this.selectedDevice) {
+    if (this.disposed || !this.isHidEnabled() || this.mode !== 'HID_RAW' || !this.selectedDevice) {
       this.reconnecting = false;
       return this.getStatus();
     }
@@ -374,7 +482,17 @@ export class HidCaptureManager {
    *      units — are NEVER auto-picked: the bench asks the operator
    *      to choose, instead of silently capturing the wrong unit. */
   async restorePreference(preference: ScannerHidPreference): Promise<ScannerCaptureStatus> {
+    // Remember the preference either way (so the bench still shows it and
+    // a later re-enable can use it), but do NOT auto-open while RAW HID is
+    // disabled — auto-restoring straight into the crashing open() path is
+    // exactly what Phase 3F prevents. Wedge stays the ready default.
     this.selectedDevice = { ...preference };
+    if (!this.isHidEnabled() || this.disposed) {
+      this.mode = 'WEDGE';
+      this.hidState = 'IDLE';
+      this.hidReasonCode = this.disabledReasonCode();
+      return this.getStatus();
+    }
     const match = await this.findUniqueMatchKey(preference);
     if (match.kind === 'none') {
       // Saved scanner not plugged in — wedge fallback stays ready.
@@ -409,7 +527,11 @@ export class HidCaptureManager {
     return this.getStatus();
   }
 
+  /** Idempotent teardown. Safe to call from multiple quit paths; the
+   *  second call is a no-op. Invalidates any in-flight callbacks first. */
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
     this.stopReconnect();
     await this.closeOpenDevice();
   }
@@ -417,11 +539,32 @@ export class HidCaptureManager {
   private async closeOpenDevice(): Promise<void> {
     const device = this.openDevice;
     this.openDevice = null;
-    if (!device) return;
+    // Invalidate this handle's callbacks BEFORE detaching/closing so a
+    // 'data'/'error' edge that fires during teardown is dropped instead
+    // of touching freed state. (Single-threaded JS makes this atomic
+    // w.r.t. the synchronous listener bodies.)
+    this.captureGeneration += 1;
+    if (!device) {
+      // No live handle — make sure the crash marker isn't left set.
+      this.options.clearOpenMarker?.();
+      return;
+    }
+    // Detach listeners first to shrink the window for a native callback
+    // landing after close (the node-hid N-API use-after-free path).
+    try {
+      device.removeAllListeners?.('data');
+      device.removeAllListeners?.('error');
+    } catch {
+      // removeAllListeners is best-effort; close still runs below.
+    }
     try {
       await device.close();
     } catch {
       // Closing an unplugged handle can throw — nothing to clean up.
     }
+    // Clean close completed (or threw without aborting the process) — the
+    // handle is released, so the crash marker can be cleared. A real
+    // native abort skips this line, leaving the marker for next launch.
+    this.options.clearOpenMarker?.();
   }
 }

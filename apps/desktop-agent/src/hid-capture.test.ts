@@ -5,12 +5,18 @@ import { HidCaptureManager } from './main/hid-capture.js';
 
 type Listener = (data: Buffer) => void;
 
-function fakeHidModule(devices: Array<Record<string, unknown>>, options: {
+interface FakeManagerOptions {
   failOpenPaths?: Set<string>;
-} = {}) {
+  hidEnabled?: () => boolean;
+  hidDisabledReason?: () => 'FLAG_DISABLED' | 'PRIOR_CRASH';
+}
+
+function fakeHidModule(devices: Array<Record<string, unknown>>, options: FakeManagerOptions = {}) {
   const opened: string[] = [];
   const listeners = new Map<string, Listener>();
+  const errorListeners = new Map<string, (err: unknown) => void>();
   const closed: string[] = [];
+  const removed: string[] = [];
   const mod = {
     devicesAsync: async () => devices,
     HIDAsync: {
@@ -22,6 +28,10 @@ function fakeHidModule(devices: Array<Record<string, unknown>>, options: {
         return {
           on(event: 'data' | 'error', listener: (arg: never) => void) {
             if (event === 'data') listeners.set(path, listener as Listener);
+            else errorListeners.set(path, listener as (e: unknown) => void);
+          },
+          removeAllListeners(_event?: 'data' | 'error') {
+            removed.push(path);
           },
           close() {
             closed.push(path);
@@ -30,7 +40,7 @@ function fakeHidModule(devices: Array<Record<string, unknown>>, options: {
       },
     },
   };
-  return { mod, opened, closed, listeners };
+  return { mod, opened, closed, removed, listeners, errorListeners };
 }
 
 const POS_INTERFACE = {
@@ -53,11 +63,14 @@ const KEYBOARD_INTERFACE = {
 
 function createManager(
   devices: Array<Record<string, unknown>>,
-  options: { failOpenPaths?: Set<string> } = {},
+  options: FakeManagerOptions = {},
 ) {
   const fake = fakeHidModule(devices, options);
   const scans: string[] = [];
   const persisted: unknown[] = [];
+  // 'mark' / 'clear' transitions of the crash marker, in order.
+  const markers: string[] = [];
+  let loadModuleCalls = 0;
   const manager = new HidCaptureManager({
     submitScan: (assembled) => {
       scans.push(assembled);
@@ -65,10 +78,30 @@ function createManager(
     persistPreference: (preference) => {
       persisted.push(preference);
     },
-    loadModule: async () => fake.mod as never,
+    loadModule: async () => {
+      loadModuleCalls += 1;
+      return fake.mod as never;
+    },
     platform: 'win32',
+    // Default ON for the HID-path tests; the disabled-path tests pass
+    // an explicit () => false.
+    hidEnabled: options.hidEnabled ?? (() => true),
+    ...(options.hidDisabledReason ? { hidDisabledReason: options.hidDisabledReason } : {}),
+    markOpenInProgress: () => {
+      markers.push('mark');
+    },
+    clearOpenMarker: () => {
+      markers.push('clear');
+    },
   });
-  return { manager, fake, scans, persisted };
+  return {
+    manager,
+    fake,
+    scans,
+    persisted,
+    markers,
+    loadModuleCalls: () => loadModuleCalls,
+  };
 }
 
 test('select + scan: HID reports flow through the assembler into submitScan', async () => {
@@ -204,6 +237,7 @@ function createWatchdogManager(initial: Array<Record<string, unknown>>) {
     persistPreference: () => {},
     loadModule: async () => mod as never,
     platform: 'win32',
+    hidEnabled: () => true,
     setTimer: ((cb: () => void, ms: number) => {
       const id = nextId++;
       timers.push({ id, cb, ms });
@@ -316,4 +350,176 @@ test('readiness status carries no raw path/serial even across reconnect', async 
   const json = JSON.stringify({ devices, status: wd.manager.getStatus() });
   assert.doesNotMatch(json, /pos-interface-path/);
   assert.doesNotMatch(json, /SECRETSERIAL42/);
+});
+
+
+// ─── Phase 3F — native-crash containment ───────────────────────────
+
+test('RAW HID disabled by default: node-hid is never imported or opened', async () => {
+  const { manager, fake, loadModuleCalls } = createManager([POS_INTERFACE], {
+    hidEnabled: () => false,
+  });
+  const devices = await manager.listDevices();
+  assert.deepEqual(devices, [], 'no enumeration while disabled');
+  const status = await manager.selectDevice('05e0:1200:00000000');
+  assert.equal(status.mode, 'WEDGE');
+  assert.equal(status.hidEnabled, false);
+  assert.equal(status.ready, true, 'wedge fallback keeps the terminal ready');
+  assert.equal(status.hidReasonCode, 'HID_DISABLED');
+  assert.deepEqual(fake.opened, [], 'no device opened');
+  assert.equal(loadModuleCalls(), 0, 'native module never loaded while disabled');
+});
+
+test('saved HID preference does not auto-open while disabled (preference remembered)', async () => {
+  const { manager, fake, loadModuleCalls } = createManager([POS_INTERFACE], {
+    hidEnabled: () => false,
+  });
+  const status = await manager.restorePreference({
+    vendorId: 0x05e0,
+    productId: 0x1200,
+    product: 'Symbol Bar Code Scanner',
+  });
+  assert.equal(status.mode, 'WEDGE');
+  assert.equal(status.hidState, 'IDLE');
+  assert.equal(status.ready, true);
+  assert.equal(status.hidReasonCode, 'HID_DISABLED');
+  assert.equal(
+    status.selectedDevice?.product,
+    'Symbol Bar Code Scanner',
+    'preference preserved for a later re-enable',
+  );
+  assert.deepEqual(fake.opened, [], 'no device auto-opened into the crash path');
+  assert.equal(loadModuleCalls(), 0, 'no import while disabled');
+});
+
+test('enabling the flag allows discovery + capture with the mocked module', async () => {
+  let enabled = false;
+  const { manager, fake, loadModuleCalls } = createManager([POS_INTERFACE], {
+    hidEnabled: () => enabled,
+  });
+  assert.deepEqual(await manager.listDevices(), [], 'disabled first → nothing');
+  assert.equal(loadModuleCalls(), 0);
+
+  enabled = true; // deliberate opt-in
+  const devices = await manager.listDevices();
+  assert.equal(devices.length, 1);
+  const status = await manager.selectDevice(devices[0]!.key);
+  assert.equal(status.hidEnabled, true);
+  assert.equal(status.mode, 'HID_RAW');
+  assert.equal(status.hidState, 'CAPTURING');
+  assert.ok(loadModuleCalls() >= 1, 'module loaded only after enabling');
+  assert.deepEqual(fake.opened, ['pos-interface-path']);
+});
+
+test('a prior-crash marker disables RAW HID on the next launch', async () => {
+  // Bootstrap decision when the marker is found: host passes
+  // hidEnabled:false + reason PRIOR_CRASH for this launch.
+  const { manager, fake, loadModuleCalls } = createManager([POS_INTERFACE], {
+    hidEnabled: () => false,
+    hidDisabledReason: () => 'PRIOR_CRASH',
+  });
+  const status = await manager.restorePreference({
+    vendorId: 0x05e0,
+    productId: 0x1200,
+    product: 'Symbol Bar Code Scanner',
+  });
+  assert.equal(status.mode, 'WEDGE');
+  assert.equal(status.ready, true, 'wedge fallback still ready after a crash');
+  assert.equal(status.hidReasonCode, 'HID_DISABLED_AFTER_CRASH');
+  assert.deepEqual(fake.opened, [], 'never auto-opens back into the crash');
+  assert.equal(loadModuleCalls(), 0);
+});
+
+test('crash marker is written before open and cleared after a clean close', async () => {
+  const { manager, markers } = createManager([POS_INTERFACE]);
+  const devices = await manager.listDevices();
+  await manager.selectDevice(devices[0]!.key);
+  // Marker is set for the live capture and not yet cleared.
+  const markIndex = markers.lastIndexOf('mark');
+  assert.ok(markIndex > -1, 'marker written before open');
+  assert.equal(
+    markers.slice(markIndex + 1).includes('clear'),
+    false,
+    'marker stays set while the handle is open',
+  );
+  // Clean close (wedge switch) clears it.
+  await manager.useWedgeMode();
+  assert.equal(markers[markers.length - 1], 'clear', 'marker cleared after clean close');
+});
+
+test('crash marker is released when an open fails without crashing', async () => {
+  const { manager, markers } = createManager([KEYBOARD_INTERFACE], {
+    failOpenPaths: new Set(['keyboard-interface-path']),
+  });
+  const devices = await manager.listDevices();
+  const status = await manager.selectDevice(devices[0]!.key);
+  assert.equal(status.hidState, 'ERROR');
+  assert.equal(
+    markers[markers.length - 1],
+    'clear',
+    'failed (non-crashing) open releases the marker',
+  );
+});
+
+test('dispose is idempotent — close runs at most once', async () => {
+  const { manager, fake } = createManager([POS_INTERFACE]);
+  const devices = await manager.listDevices();
+  await manager.selectDevice(devices[0]!.key);
+  await manager.dispose();
+  await manager.dispose();
+  assert.deepEqual(fake.closed, ['pos-interface-path'], 'closed exactly once across two disposes');
+});
+
+test('HID data reports after dispose do not submit scans', async () => {
+  const { manager, fake, scans } = createManager([POS_INTERFACE]);
+  const devices = await manager.listDevices();
+  await manager.selectDevice(devices[0]!.key);
+  const push = fake.listeners.get('pos-interface-path');
+  assert.ok(push, 'data listener registered');
+  await manager.dispose();
+  // Late 'a' + Enter edges from the now-disposed handle.
+  for (const usage of [0x04, 0x28]) {
+    push!(Buffer.from([0, 0, usage, 0, 0, 0, 0, 0]));
+    push!(Buffer.from([0, 0, 0, 0, 0, 0, 0, 0]));
+  }
+  assert.deepEqual(scans, [], 'no scan submitted from a disposed handle');
+});
+
+test('HID error callbacks after dispose schedule no reconnect', async () => {
+  const wd = createWatchdogManager([POS_INTERFACE]);
+  const devices = await wd.manager.listDevices();
+  const posKey = devices.find((d) => d.usagePage === 0x8c)!.key;
+  await wd.manager.selectDevice(posKey);
+  await wd.manager.dispose();
+  wd.fireError('pos-interface-path'); // late edge from the disposed handle
+  await flushMicrotasks();
+  assert.equal(wd.pendingTimers(), 0, 'no reconnect scheduled after dispose');
+  assert.equal(wd.manager.getStatus().reconnecting, false);
+});
+
+test('keyboard-class scanner stays fallback-recommended (never auto-USE)', async () => {
+  const { manager } = createManager([KEYBOARD_INTERFACE]);
+  const [kb] = await manager.listDevices();
+  assert.ok(kb);
+  assert.equal(kb.keyboardClass, true);
+  assert.equal(kb.category, 'KEYBOARD_SCANNER');
+  assert.notEqual(kb.recommendation, 'USE');
+  assert.equal(kb.recommendation, 'TRY_HID_MODE');
+});
+
+test('disabled status carries no raw path/serial and keeps wedge ready', async () => {
+  const { manager } = createManager([{ ...POS_INTERFACE, serialNumber: 'FULLSERIAL12345' }], {
+    hidEnabled: () => false,
+  });
+  const devices = await manager.listDevices();
+  const status = await manager.restorePreference({
+    vendorId: 0x05e0,
+    productId: 0x1200,
+    product: null,
+  });
+  const json = JSON.stringify({ devices, status });
+  assert.doesNotMatch(json, /pos-interface-path/);
+  assert.doesNotMatch(json, /FULLSERIAL12345/);
+  assert.equal(status.ready, true);
+  assert.equal(status.hidEnabled, false);
 });

@@ -573,6 +573,11 @@ const scannerHidDeviceList = document.querySelector<HTMLUListElement>('#scanner-
 // "Show all HID devices" toggle flips (no re-enumeration needed).
 let lastHidDevices: SafeScannerHidDevice[] = [];
 
+// Phase 3F — mirrors status.hidEnabled. Drives whether the experimental
+// RAW HID controls (Detect / Use this scanner / Try HID mode) are
+// clickable; when off, Keyboard Wedge is the only capture path offered.
+let hidCaptureEnabled = false;
+
 const HID_CATEGORY_LABEL: Record<SafeScannerHidDevice['category'], string> = {
   SCANNER: 'Scanner',
   KEYBOARD_SCANNER: 'Keyboard-mode scanner',
@@ -605,6 +610,11 @@ const HID_REASON_COPY: Record<string, string> = {
     'No scanner detected — keyboard-wedge fallback is ready in JPPOS while the cashier is open.',
   SELECT_SCANNER:
     'Select scanner — two matching units are connected; detect devices and pick one.',
+  // Phase 3F — experimental RAW HID is opt-in / contained.
+  HID_DISABLED:
+    'RAW HID disabled. Keyboard Wedge fallback is active. RAW HID is experimental and off by default — enable the agent HID flag to try focus-independent capture, or switch the scanner to HID-POS mode.',
+  HID_DISABLED_AFTER_CRASH:
+    'RAW HID was disabled after a previous crash. Keyboard Wedge fallback is active. Relaunch the agent to retry, or switch the scanner to HID-POS mode with its vendor setup barcode.',
 };
 
 function hex4(value: number): string {
@@ -612,9 +622,19 @@ function hex4(value: number): string {
 }
 
 function renderCaptureStatus(status: ScannerCaptureStatus): void {
+  // Phase 3F — gate the experimental RAW HID controls on the feature flag.
+  hidCaptureEnabled = status.hidEnabled;
+  if (scannerHidDetectButton) {
+    scannerHidDetectButton.disabled = !status.hidEnabled;
+    scannerHidDetectButton.textContent = status.hidEnabled
+      ? 'Detect HID scanners'
+      : 'Detect HID scanners (disabled)';
+  }
   setText(
     scannerCaptureMode,
-    status.mode === 'HID_RAW' ? 'HID Raw (focus-independent)' : 'Keyboard Wedge',
+    status.mode === 'HID_RAW' && status.hidEnabled
+      ? 'HID Raw (focus-independent)'
+      : 'Keyboard Wedge',
   );
   const device = status.selectedDevice;
   setText(
@@ -623,6 +643,18 @@ function renderCaptureStatus(status: ScannerCaptureStatus): void {
       ? `${device.product ?? 'HID device'} (${hex4(device.vendorId)}:${hex4(device.productId)})`
       : 'None',
   );
+  // Experimental RAW HID is off (opt-in flag or a prior-crash cool-off):
+  // show the disabled reason, clear any stale device rows, and stop —
+  // Keyboard Wedge remains the active, ready capture path.
+  if (!status.hidEnabled) {
+    const code = status.hidReasonCode ?? 'HID_DISABLED';
+    setText(
+      scannerHidStatus,
+      HID_REASON_COPY[code] ?? 'RAW HID disabled. Keyboard Wedge fallback is active.',
+    );
+    scannerHidDeviceList?.replaceChildren();
+    return;
+  }
   if (status.reconnecting || status.hidState === 'RECONNECTING') {
     setText(
       scannerHidStatus,
@@ -685,7 +717,12 @@ function renderHidDeviceList(devices: SafeScannerHidDevice[]): void {
         : device.recommendation === 'TRY_HID_MODE'
           ? 'Try HID mode'
           : 'Not recommended';
+    // RAW HID is experimental + opt-in — never offer the open action when
+    // the feature is disabled (defensive; the list is cleared in that
+    // state, but this keeps the control honest if it is ever shown).
+    selectButton.disabled = !hidCaptureEnabled;
     selectButton.addEventListener('click', () => {
+      if (!hidCaptureEnabled) return;
       const bridge = bridgeOrNull();
       if (!bridge) return;
       void bridge.selectScannerHidDevice(device.key).then((status) => {
@@ -702,6 +739,9 @@ scannerHidShowAll?.addEventListener('change', () => {
 });
 
 scannerHidDetectButton?.addEventListener('click', () => {
+  // Experimental RAW HID is opt-in; the button is disabled when off, but
+  // guard the handler too so detection never enumerates HID while gated.
+  if (!hidCaptureEnabled) return;
   const bridge = bridgeOrNull();
   if (!bridge) return;
   setText(scannerHidStatus, 'Detecting HID devices…');

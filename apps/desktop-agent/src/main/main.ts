@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { networkInterfaces, platform, release } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -6,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   HidCaptureManager,
+  type HidDisabledReason,
   type ScannerCaptureMode,
 } from './hid-capture.js';
 
@@ -89,6 +91,12 @@ const __dirname = dirname(__filename);
 const APP_VERSION = '0.1.0-scaffold';
 const DEFAULT_DEV_API_BASE_URL = 'http://127.0.0.1:3000';
 const MOCK_FLOW_ENABLED = process.env.JDA_ENABLE_MOCK_DEVICE_FLOW === 'true';
+// Phase 3F — RAW HID scanner capture is EXPERIMENTAL + opt-in. Default
+// OFF: node-hid (whose Windows backend can abort the whole process with
+// a native N-API assertion) is never imported or opened unless the
+// operator explicitly enables it. The keyboard-wedge fallback is the
+// safe default capture path and is unaffected by this flag.
+const HID_SCANNER_ENABLED = process.env.JDA_HID_SCANNER_ENABLED === 'true';
 const DEFAULT_MOCK_CAPABILITIES: DeviceCapability[] = [
   'POS_TERMINAL',
   'BARCODE_SCANNER',
@@ -180,11 +188,67 @@ function persistScannerCapturePreference(preference: {
   });
 }
 
+// Phase 3F — RAW HID crash containment state.
+//   • hidCrashMarkerPath: a tiny sentinel file written right before a
+//     native HID open and removed after a clean close. If the process
+//     aborts mid-open (the node-hid native assertion), it survives and
+//     trips on next launch.
+//   • hidPriorCrashDetected: set true at bootstrap when the marker is
+//     found — holds RAW HID down for this one launch.
+//   • hidGateReady: false until bootstrap has evaluated the marker, so
+//     nothing can open a device before the crash check has run.
+let hidCrashMarkerPath: string | null = null;
+let hidPriorCrashDetected = false;
+let hidGateReady = false;
+
+/** RAW HID is permitted only when the operator opted in AND the crash
+ *  check has run AND no prior-crash marker is holding it down. */
+function isHidCaptureEnabled(): boolean {
+  return HID_SCANNER_ENABLED && hidGateReady && !hidPriorCrashDetected;
+}
+
+/** Why RAW HID is currently off — flag not set takes precedence over a
+ *  crash marker (the operator simply hasn't opted in). */
+function currentHidDisabledReason(): HidDisabledReason {
+  if (!HID_SCANNER_ENABLED) return 'FLAG_DISABLED';
+  if (hidPriorCrashDetected) return 'PRIOR_CRASH';
+  return 'FLAG_DISABLED';
+}
+
+// The marker is a FIXED string — never a path, serial, or any device
+// identifier. Synchronous I/O so it is durably on disk before the
+// native open() that might abort, and reliably gone on clean shutdown.
+function writeHidOpenMarker(): void {
+  if (!hidCrashMarkerPath) return;
+  try {
+    writeFileSync(hidCrashMarkerPath, 'hid-open-in-progress', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch {
+    // Best-effort: if the marker can't be written, capture still runs;
+    // we simply lose the prior-crash signal for this open.
+  }
+}
+
+function clearHidOpenMarker(): void {
+  if (!hidCrashMarkerPath) return;
+  try {
+    rmSync(hidCrashMarkerPath, { force: true });
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
 const hidCaptureManager = new HidCaptureManager({
   submitScan: (assembled) => {
     void scannerAdapter.validateInput(assembled, 'HID');
   },
   persistPreference: persistScannerCapturePreference,
+  hidEnabled: isHidCaptureEnabled,
+  hidDisabledReason: currentHidDisabledReason,
+  markOpenInProgress: writeHidOpenMarker,
+  clearOpenMarker: clearHidOpenMarker,
 });
 
 async function restoreScannerCapturePreference(): Promise<void> {
@@ -1238,6 +1302,20 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  // Phase 3F — evaluate the RAW HID crash marker BEFORE any restore so a
+  // prior native abort cannot auto-open straight back into the crash.
+  hidCrashMarkerPath = join(userDataPath, 'scanner-hid-open.marker');
+  if (existsSync(hidCrashMarkerPath)) {
+    // A marker that outlived its launch means the last HID open never
+    // closed cleanly — almost certainly the native abort. Hold RAW HID
+    // down for THIS launch, then consume the marker so a deliberate
+    // relaunch can retry (one-launch cool-off, not a permanent lockout).
+    hidPriorCrashDetected = true;
+    clearHidOpenMarker();
+    console.warn('[scanner] RAW_HID_DISABLED_AFTER_PRIOR_CRASH');
+  }
+  hidGateReady = true;
+
   scannerPreferencePath = join(userDataPath, 'scanner-capture-preferences.json');
   void restoreScannerCapturePreference();
 
@@ -1378,6 +1456,10 @@ app.on('activate', () => {
 app.on('before-quit', (event) => {
   stopActivationPolling();
   stopHeartbeatLifecycle();
+  // Clean shutdown — clear the RAW HID crash marker synchronously so a
+  // graceful quit (even mid-capture) is never mistaken for a crash on the
+  // next launch. A real native abort skips before-quit entirely.
+  clearHidOpenMarker();
   void hidCaptureManager.dispose();
   if (!proxy) return;
   event.preventDefault();

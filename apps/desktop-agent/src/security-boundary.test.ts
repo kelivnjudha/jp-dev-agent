@@ -430,3 +430,46 @@ test('device status proxy does not expose scanner capture material', async () =>
   assert.doesNotMatch(proxy, /valueHashPrefix/);
   assert.doesNotMatch(proxy, /ScanEvent/);
 });
+
+test('RAW HID is opt-in, crash-contained, and main-process only', async () => {
+  const [main, preload, renderer, hidCapture] = await Promise.all([
+    readSource('apps/desktop-agent/src/main/main.ts'),
+    readSource('apps/desktop-agent/src/preload/preload.cts'),
+    readSource('apps/desktop-agent/src/renderer/renderer.ts'),
+    readSource('apps/desktop-agent/src/main/hid-capture.ts'),
+  ]);
+
+  // The experimental RAW HID feature is gated behind an explicit env
+  // opt-in evaluated ONLY in the main process; the gate defaults off.
+  assert.match(main, /JDA_HID_SCANNER_ENABLED === 'true'/);
+  assert.match(main, /function isHidCaptureEnabled/);
+  assert.match(main, /hidEnabled: isHidCaptureEnabled/);
+  assert.doesNotMatch(preload, /JDA_HID_SCANNER_ENABLED|hidCaptureManager|node-hid/);
+  assert.doesNotMatch(renderer, /JDA_HID_SCANNER_ENABLED|node-hid|HIDAsync|devicesAsync/);
+
+  // The native addon is never imported while disabled — the dynamic
+  // import is short-circuited on the gate before it can run.
+  assert.match(hidCapture, /if \(!this\.isHidEnabled\(\)\) return null;/);
+
+  // The crash marker is a FIXED sentinel string — never a device path,
+  // serial, or any identifier.
+  assert.match(main, /'hid-open-in-progress'/);
+  const markerWriteIndex = main.indexOf('function writeHidOpenMarker');
+  const markerWriteEnd = main.indexOf('function clearHidOpenMarker', markerWriteIndex);
+  assert.ok(markerWriteIndex > -1 && markerWriteEnd > markerWriteIndex);
+  const markerBody = main.slice(markerWriteIndex, markerWriteEnd);
+  assert.doesNotMatch(
+    markerBody,
+    /serialNumber|vendorId|productId|deviceId|raw\.path|device\.path/,
+  );
+
+  // A graceful quit clears the marker so it can't be mistaken for a
+  // crash on the next launch.
+  assert.match(main, /app\.on\('before-quit'[\s\S]*clearHidOpenMarker\(\)/);
+
+  // Lifecycle hardening: idempotent dispose + generation-guarded
+  // callbacks so a late native edge can't touch torn-down state.
+  assert.match(hidCapture, /if \(this\.disposed\) return;/);
+  assert.match(hidCapture, /captureGeneration/);
+  assert.match(hidCapture, /removeAllListeners/);
+});

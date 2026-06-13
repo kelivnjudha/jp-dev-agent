@@ -46,6 +46,9 @@ export interface SafeScannerHidDevice {
 
 export interface ScannerCaptureStatus {
   mode: 'WEDGE' | 'HID_RAW';
+  /** Phase 3F — experimental RAW HID opt-in is on AND not held down by a
+   *  prior-crash marker. The bench disables the HID controls when false. */
+  hidEnabled: boolean;
   hidSupported: boolean;
   hidState: 'IDLE' | 'CAPTURING' | 'RECONNECTING' | 'ERROR' | 'UNAVAILABLE';
   hidReasonCode: string | null;

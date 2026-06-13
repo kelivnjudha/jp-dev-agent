@@ -202,9 +202,12 @@
                 </div>
               </dl>
               <p class="small">
+                <span class="lab-tag">RAW HID · EXPERIMENTAL</span>
                 HID raw capture reads the scanner directly in the main
-                process, so scans work while JPPOS is focused. Keyboard-wedge
-                scanners act like a keyboard and need this window focused.
+                process, so scans work while JPPOS is focused. It is opt-in
+                (JDA_HID_SCANNER_ENABLED) and auto-disables after a crash —
+                Keyboard Wedge is the safe default. Keyboard-wedge scanners
+                act like a keyboard and need this window focused.
               </p>
               <div class="input-row">
                 <button id="scanner-hid-detect" class="secondary">
