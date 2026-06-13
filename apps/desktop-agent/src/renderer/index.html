@@ -211,16 +211,26 @@
                   Detect HID scanners
                 </button>
                 <button id="scanner-wedge-fallback" class="ghost">
-                  Use Keyboard Wedge
+                  Use Keyboard Wedge fallback
                 </button>
               </div>
+              <label class="checkbox-row small">
+                <input id="scanner-hid-show-all" type="checkbox" />
+                Show all HID devices (advanced / debugging)
+              </label>
               <p id="scanner-hid-status" class="small" role="status"></p>
               <ul id="scanner-hid-devices" class="hid-device-list"></ul>
               <p class="small">
-                Device names, vendor/product ids, and masked serials only —
-                raw HID reports and device paths never leave the agent core.
-                Windows keeps keyboard-class scanners for itself; switch the
-                scanner to HID-POS mode or stay on Keyboard Wedge.
+                Only likely scanners are shown by default — keyboards, mice,
+                Bluetooth receivers, and LED/RGB controllers are hidden behind
+                "Show all". Device names, vendor/product ids, and masked serials
+                only — raw HID reports and device paths never leave the agent
+                core.
+              </p>
+              <p class="small">
+                If your scanner is shown as keyboard-mode, use the scanner
+                vendor's setup barcode to switch it to HID-POS / USB HID POS
+                mode for focus-independent scanning.
               </p>
             </div>
 

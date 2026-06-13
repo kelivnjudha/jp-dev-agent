@@ -148,12 +148,18 @@ export class HidCaptureManager {
       }
       safeDevices.push(safe);
     }
-    // Scanner-looking devices first, keyboard-class collections last.
-    return safeDevices.sort((a, b) => {
-      const score = (d: SafeHidDeviceInfo) =>
-        (d.likelyScanner ? 0 : 1) + (d.keyboardClass ? 2 : 0);
-      return score(a) - score(b);
-    });
+    // Rank by category: openable scanners first, keyboard-mode
+    // scanners next, everything else after. The renderer hides the
+    // non-scanner tail unless "Show all HID devices" is on.
+    const rank: Record<SafeHidDeviceInfo['category'], number> = {
+      SCANNER: 0,
+      KEYBOARD_SCANNER: 1,
+      KEYBOARD: 2,
+      POINTER: 3,
+      SYSTEM_CONTROLLER: 4,
+      OTHER: 5,
+    };
+    return safeDevices.sort((a, b) => rank[a.category] - rank[b.category]);
   }
 
   /** Open the device behind a selection key from the LAST discovery

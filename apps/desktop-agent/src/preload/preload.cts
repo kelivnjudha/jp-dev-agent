@@ -33,6 +33,15 @@ export interface SafeScannerHidDevice {
   serialMasked: string | null;
   keyboardClass: boolean;
   likelyScanner: boolean;
+  category:
+    | 'SCANNER'
+    | 'KEYBOARD_SCANNER'
+    | 'KEYBOARD'
+    | 'POINTER'
+    | 'SYSTEM_CONTROLLER'
+    | 'OTHER';
+  recommendation: 'USE' | 'TRY_HID_MODE' | 'NOT_RECOMMENDED';
+  defaultVisible: boolean;
 }
 
 export interface ScannerCaptureStatus {

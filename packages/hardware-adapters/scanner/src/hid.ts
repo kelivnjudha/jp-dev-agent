@@ -198,6 +198,17 @@ export interface RawHidDeviceInfo {
   usage?: number;
 }
 
+/** Coarse device category used to rank + filter the discovery list. */
+export type HidDeviceCategory =
+  | 'SCANNER' // HID-POS usage page or scanner-named non-keyboard → best
+  | 'KEYBOARD_SCANNER' // scanner-named but keyboard-class (wedge mode)
+  | 'KEYBOARD'
+  | 'POINTER' // mouse / pointer
+  | 'SYSTEM_CONTROLLER' // LED/RGB/consumer-control/vendor system devices
+  | 'OTHER';
+
+export type HidRecommendation = 'USE' | 'TRY_HID_MODE' | 'NOT_RECOMMENDED';
+
 export interface SafeHidDeviceInfo {
   /** Stable selection key — vendor:product:hash8(path). The raw OS
    *  path stays in the main process; the renderer only ever sees the
@@ -217,6 +228,12 @@ export interface SafeHidDeviceInfo {
   keyboardClass: boolean;
   /** HID POS scanner usage page (0x8C) or scanner-ish product name. */
   likelyScanner: boolean;
+  category: HidDeviceCategory;
+  recommendation: HidRecommendation;
+  /** Whether the device shows without the "Show all HID devices"
+   *  toggle. Only scanner-ish devices are shown by default so the
+   *  list isn't flooded with LED controllers, keyboards, and mice. */
+  defaultVisible: boolean;
 }
 
 const SAFE_NAME_RE = /[^\x20-\x7e]/g;
@@ -245,24 +262,68 @@ export function hidSelectionKey(raw: RawHidDeviceInfo): string {
 }
 
 const SCANNER_NAME_HINT = /(scan|barcode|imager|symbol|honeywell|zebra|datalogic|newland)/i;
+// Obvious non-scanner system/peripheral devices that flooded the QA
+// list (LED/RGB controllers, lighting engines, vendor system agents).
+const SYSTEM_NAME_HINT =
+  /(aura|\brgb\b|\bled\b|lighting|chroma|mystic|\bene\b|\bite\b|\bcorsair\b|\brazer\b|fan\b|cooler|controller hub|system control|power delivery|\bsmbus\b|\bhub\b)/i;
+const POINTER_NAME_HINT = /(mouse|trackpad|touchpad|pointing)/i;
+
+function classifyHidDevice(
+  usagePage: number | null,
+  usage: number | null,
+  product: string | null,
+  manufacturer: string | null,
+): HidDeviceCategory {
+  const name = `${product ?? ''} ${manufacturer ?? ''}`;
+  const scannerNamed = product !== null && SCANNER_NAME_HINT.test(name);
+  const keyboardClass = usagePage === 0x01 && usage === 0x06;
+  const pointer =
+    (usagePage === 0x01 && (usage === 0x02 || usage === 0x01))
+    || POINTER_NAME_HINT.test(name);
+
+  if (usagePage === 0x8c || (scannerNamed && !keyboardClass)) return 'SCANNER';
+  if (scannerNamed && keyboardClass) return 'KEYBOARD_SCANNER';
+  if (keyboardClass) return 'KEYBOARD';
+  if (pointer) return 'POINTER';
+  if (
+    SYSTEM_NAME_HINT.test(name)
+    || usagePage === 0x0c // consumer control
+    || (usagePage === 0x01 && usage === 0x80) // system control
+    || (usagePage !== null && usagePage >= 0xff00) // vendor-defined page
+  ) {
+    return 'SYSTEM_CONTROLLER';
+  }
+  return 'OTHER';
+}
+
+function recommendationForCategory(category: HidDeviceCategory): HidRecommendation {
+  if (category === 'SCANNER') return 'USE';
+  if (category === 'KEYBOARD_SCANNER') return 'TRY_HID_MODE';
+  return 'NOT_RECOMMENDED';
+}
 
 export function projectSafeHidDeviceInfo(raw: RawHidDeviceInfo): SafeHidDeviceInfo {
   const usagePage = typeof raw.usagePage === 'number' ? raw.usagePage : null;
   const usage = typeof raw.usage === 'number' ? raw.usage : null;
   const product = safeName(raw.product);
+  const manufacturer = safeName(raw.manufacturer);
+  const category = classifyHidDevice(usagePage, usage, product, manufacturer);
   return {
     key: hidSelectionKey(raw),
     vendorId: raw.vendorId ?? 0,
     productId: raw.productId ?? 0,
-    manufacturer: safeName(raw.manufacturer),
+    manufacturer,
     product,
     usagePage,
     usage,
     serialMasked: maskHidSerial(raw.serialNumber),
     keyboardClass: usagePage === 0x01 && usage === 0x06,
-    likelyScanner:
-      usagePage === 0x8c
-      || (product !== null && SCANNER_NAME_HINT.test(product)),
+    likelyScanner: category === 'SCANNER' || category === 'KEYBOARD_SCANNER',
+    category,
+    recommendation: recommendationForCategory(category),
+    // Only scanner-ish devices show by default; the bench's
+    // "Show all HID devices" toggle reveals the rest for debugging.
+    defaultVisible: category === 'SCANNER' || category === 'KEYBOARD_SCANNER',
   };
 }
 

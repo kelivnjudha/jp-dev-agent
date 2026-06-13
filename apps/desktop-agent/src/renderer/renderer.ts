@@ -565,8 +565,22 @@ const scannerCaptureMode = document.querySelector<HTMLElement>('#scanner-capture
 const scannerSelectedDevice = document.querySelector<HTMLElement>('#scanner-selected-device');
 const scannerHidDetectButton = document.querySelector<HTMLButtonElement>('#scanner-hid-detect');
 const scannerWedgeFallbackButton = document.querySelector<HTMLButtonElement>('#scanner-wedge-fallback');
+const scannerHidShowAll = document.querySelector<HTMLInputElement>('#scanner-hid-show-all');
 const scannerHidStatus = document.querySelector<HTMLElement>('#scanner-hid-status');
 const scannerHidDeviceList = document.querySelector<HTMLUListElement>('#scanner-hid-devices');
+
+// Last device list from the most recent detect, re-rendered when the
+// "Show all HID devices" toggle flips (no re-enumeration needed).
+let lastHidDevices: SafeScannerHidDevice[] = [];
+
+const HID_CATEGORY_LABEL: Record<SafeScannerHidDevice['category'], string> = {
+  SCANNER: 'Scanner',
+  KEYBOARD_SCANNER: 'Keyboard-mode scanner',
+  KEYBOARD: 'Keyboard',
+  POINTER: 'Mouse / pointer',
+  SYSTEM_CONTROLLER: 'System / LED controller',
+  OTHER: 'Other HID device',
+};
 
 const HID_REASON_COPY: Record<string, string> = {
   HID_MODULE_UNAVAILABLE:
@@ -629,32 +643,37 @@ function renderCaptureStatus(status: ScannerCaptureStatus): void {
 
 function renderHidDeviceList(devices: SafeScannerHidDevice[]): void {
   if (!scannerHidDeviceList) return;
+  lastHidDevices = devices;
+  const showAll = scannerHidShowAll?.checked === true;
+  const visible = showAll ? devices : devices.filter((d) => d.defaultVisible);
   scannerHidDeviceList.replaceChildren();
-  if (devices.length === 0) {
+  if (visible.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'small';
-    empty.textContent = 'No HID devices listed. Replug the scanner and detect again.';
+    empty.textContent = devices.length === 0
+      ? 'No HID devices listed. Replug the scanner and detect again.'
+      : 'No likely scanners found. Tick "Show all HID devices" to see every device.';
     scannerHidDeviceList.append(empty);
     return;
   }
-  for (const device of devices) {
+  for (const device of visible) {
     const item = document.createElement('li');
     item.className = 'hid-device-row';
     const label = document.createElement('span');
     const name = device.product ?? device.manufacturer ?? 'HID device';
-    const hints: string[] = [];
-    if (device.likelyScanner) hints.push('scanner');
-    if (device.keyboardClass) hints.push('keyboard-class');
+    const hints: string[] = [HID_CATEGORY_LABEL[device.category]];
+    if (device.keyboardClass) hints.push('Often OS-blocked on Windows');
     if (device.serialMasked) hints.push(`SN ${device.serialMasked}`);
-    label.textContent = `${name} · ${hex4(device.vendorId)}:${hex4(device.productId)}${
-      hints.length > 0 ? ` · ${hints.join(' · ')}` : ''
-    }`;
+    label.textContent = `${name} · ${hex4(device.vendorId)}:${hex4(device.productId)} · ${hints.join(' · ')}`;
     const selectButton = document.createElement('button');
     selectButton.type = 'button';
-    selectButton.className = 'secondary';
-    selectButton.textContent = device.keyboardClass
-      ? 'Try (often OS-blocked)'
-      : 'Use this scanner';
+    selectButton.className = device.recommendation === 'USE' ? 'secondary' : 'ghost';
+    selectButton.textContent =
+      device.recommendation === 'USE'
+        ? 'Use this scanner'
+        : device.recommendation === 'TRY_HID_MODE'
+          ? 'Try HID mode'
+          : 'Not recommended';
     selectButton.addEventListener('click', () => {
       const bridge = bridgeOrNull();
       if (!bridge) return;
@@ -666,6 +685,10 @@ function renderHidDeviceList(devices: SafeScannerHidDevice[]): void {
     scannerHidDeviceList.append(item);
   }
 }
+
+scannerHidShowAll?.addEventListener('change', () => {
+  renderHidDeviceList(lastHidDevices);
+});
 
 scannerHidDetectButton?.addEventListener('click', () => {
   const bridge = bridgeOrNull();
