@@ -47,13 +47,16 @@ export interface SafeScannerHidDevice {
 export interface ScannerCaptureStatus {
   mode: 'WEDGE' | 'HID_RAW';
   hidSupported: boolean;
-  hidState: 'IDLE' | 'CAPTURING' | 'ERROR' | 'UNAVAILABLE';
+  hidState: 'IDLE' | 'CAPTURING' | 'RECONNECTING' | 'ERROR' | 'UNAVAILABLE';
   hidReasonCode: string | null;
   selectedDevice: {
     vendorId: number;
     productId: number;
     product: string | null;
   } | null;
+  ready: boolean;
+  captureSource: 'HID' | 'WEDGE';
+  reconnecting: boolean;
 }
 
 const api = {

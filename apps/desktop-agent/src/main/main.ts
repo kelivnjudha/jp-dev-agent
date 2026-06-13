@@ -1222,11 +1222,17 @@ async function bootstrap(): Promise<void> {
       ) {
         throw new Error('POS_DEVICE_NOT_ACTIVE');
       }
-      return scannerEventQueue.waitForAfter(cursor, waitMs);
+      const batch = await scannerEventQueue.waitForAfter(cursor, waitMs);
+      // Phase 3E — expose the safe capture mode so JPPOS can show
+      // "HID scanner active" vs "keyboard-wedge". Enum only; no raw data.
+      return { ...batch, captureMode: hidCaptureManager.getStatus().mode };
     },
     allowedPosOrigin: resolveJpposAllowedOrigin(),
     safeLog: (event) => {
       if (process.env.NODE_ENV === 'production') return;
+      // Idle scanner long-polls are pure noise — skip them so the dev
+      // console isn't flooded with empty cursor=0 reads.
+      if (event.path === '/scanner/events') return;
       // Safe metadata only: method/path/status. No bodies, tokens, keys, or setup codes.
       console.info('[agent-proxy]', event);
     },

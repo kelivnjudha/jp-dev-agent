@@ -62,7 +62,10 @@ const posProofRateLimits = new Map<string, { count: number; resetAt: number }>()
 // proof endpoint. Still bounded: a runaway client cannot spin the CPU.
 const SCANNER_EVENTS_RATE_LIMIT_WINDOW_MS = 60_000;
 const SCANNER_EVENTS_RATE_LIMIT_MAX = 240;
-const SCANNER_EVENTS_MAX_WAIT_MS = 1_500;
+// Long-poll hold (ms). A fresh scan resolves the wait immediately, so a
+// longer cap only reduces IDLE request churn (≈1 req / 10s instead of
+// per-1.5s) without hurting responsiveness.
+const SCANNER_EVENTS_MAX_WAIT_MS = 10_000;
 const SCANNER_EVENTS_CURSOR_RE = /^\d{1,12}$/u;
 const scannerEventsRateLimits = new Map<string, { count: number; resetAt: number }>();
 

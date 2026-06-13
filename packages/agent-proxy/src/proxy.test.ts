@@ -161,7 +161,7 @@ test('scanner events endpoint passes cursor through and returns the opaque paylo
     assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:3002');
     const body = await response.json();
     assert.deepEqual(body, { cursor: 9, events: [{ type: 'SCAN', scanId: 'x' }] });
-    assert.deepEqual(seenQueries, [{ cursor: 7, waitMs: 1500 }], 'waitMs is capped at 1500');
+    assert.deepEqual(seenQueries, [{ cursor: 7, waitMs: 9999 }], 'waitMs is passed through under the 10s cap');
   }, {
     getScannerEvents: async (query) => {
       seenQueries.push(query);

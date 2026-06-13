@@ -124,7 +124,9 @@ test('restorePreference refuses to auto-pick between two identical scanner units
     product: 'Symbol Bar Code Scanner',
   });
   assert.equal(status.mode, 'WEDGE');
-  assert.equal(status.hidReasonCode, 'HID_MULTIPLE_MATCHES');
+  assert.equal(status.hidReasonCode, 'SELECT_SCANNER');
+  assert.equal(status.ready, true, 'wedge fallback keeps the terminal ready');
+  assert.equal(status.captureSource, 'WEDGE');
   assert.deepEqual(fake.opened, [], 'no device auto-opened');
 });
 
@@ -135,8 +137,9 @@ test('restorePreference reports absence when the preferred device is unplugged',
     productId: 0x1200,
     product: null,
   });
-  assert.equal(status.hidReasonCode, 'HID_PREFERRED_DEVICE_ABSENT');
+  assert.equal(status.hidReasonCode, 'NO_SCANNER');
   assert.equal(status.mode, 'WEDGE');
+  assert.equal(status.ready, true);
 });
 
 test('wedge fallback closes the open device and persists the mode', async () => {
@@ -159,4 +162,158 @@ test('status and device list never carry raw paths or full serials', async () =>
   assert.doesNotMatch(exposed, /pos-interface-path/);
   assert.doesNotMatch(exposed, /FULLSERIAL12345/);
   assert.match(exposed, /FU••••/);
+});
+
+
+// ─── Phase 3E — watchdog reconnect + readiness ────────────────────
+
+interface PendingTimer { id: number; cb: () => void | Promise<void>; ms: number; }
+
+// The device 'error' callback fire-and-forgets an async disconnect
+// handler (close → set state → schedule retry); flush several
+// microtasks so it has fully settled before asserting.
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 30; i += 1) await Promise.resolve();
+}
+
+function createWatchdogManager(initial: Array<Record<string, unknown>>) {
+  let currentDevices = [...initial];
+  const opened: string[] = [];
+  const closed: string[] = [];
+  const errorListeners = new Map<string, (err: unknown) => void>();
+  const failOpenPaths = new Set<string>();
+  const timers: PendingTimer[] = [];
+  let nextId = 1;
+  const mod = {
+    devicesAsync: async () => [...currentDevices],
+    HIDAsync: {
+      open: async (path: string) => {
+        if (failOpenPaths.has(path)) throw new Error('cannot open');
+        opened.push(path);
+        return {
+          on(event: 'data' | 'error', listener: (arg: never) => void) {
+            if (event === 'error') errorListeners.set(path, listener as (e: unknown) => void);
+          },
+          close() { closed.push(path); },
+        };
+      },
+    },
+  };
+  const manager = new HidCaptureManager({
+    submitScan: () => {},
+    persistPreference: () => {},
+    loadModule: async () => mod as never,
+    platform: 'win32',
+    setTimer: ((cb: () => void, ms: number) => {
+      const id = nextId++;
+      timers.push({ id, cb, ms });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }),
+    clearTimer: ((handle: ReturnType<typeof setTimeout>) => {
+      const i = timers.findIndex((t) => t.id === (handle as unknown as number));
+      if (i >= 0) timers.splice(i, 1);
+    }),
+  });
+  return {
+    manager, opened, closed, failOpenPaths,
+    setDevices: (d: Array<Record<string, unknown>>) => { currentDevices = [...d]; },
+    fireError: (path: string) => errorListeners.get(path)?.(new Error('disconnect')),
+    runNextTimer: async () => {
+      const t = timers.shift();
+      if (t) { await t.cb(); await flushMicrotasks(); }
+    },
+    pendingTimers: () => timers.length,
+    lastDelay: () => (timers.length ? timers[timers.length - 1]!.ms : null),
+  };
+}
+
+test('a unique saved scanner auto-restores to a ready HID capture on startup', async () => {
+  const wd = createWatchdogManager([KEYBOARD_INTERFACE, POS_INTERFACE]);
+  const status = await wd.manager.restorePreference({
+    vendorId: 0x05e0, productId: 0x1200, product: 'Symbol Bar Code Scanner',
+  });
+  assert.equal(status.mode, 'HID_RAW');
+  assert.equal(status.hidState, 'CAPTURING');
+  assert.equal(status.ready, true);
+  assert.equal(status.captureSource, 'HID');
+  assert.deepEqual(wd.opened, ['pos-interface-path']);
+});
+
+test('disconnect → watchdog reconnects the same scanner when it returns', async () => {
+  const wd = createWatchdogManager([POS_INTERFACE]);
+  const devices = await wd.manager.listDevices();
+  const posKey = devices.find((d) => d.usagePage === 0x8c)!.key;
+  const live = await wd.manager.selectDevice(posKey);
+  assert.equal(live.hidState, 'CAPTURING');
+
+  // Unplug: fire the device error → RECONNECTING + a scheduled retry.
+  wd.fireError('pos-interface-path');
+  await flushMicrotasks();
+  const dropped = wd.manager.getStatus();
+  assert.equal(dropped.hidState, 'RECONNECTING');
+  assert.equal(dropped.reconnecting, true);
+  assert.equal(dropped.ready, false);
+  assert.equal(wd.pendingTimers(), 1);
+  assert.equal(wd.lastDelay(), 2_000, 'first backoff is 2s');
+
+  // Device still present → next tick reopens it.
+  await wd.runNextTimer();
+  const back = wd.manager.getStatus();
+  assert.equal(back.hidState, 'CAPTURING');
+  assert.equal(back.reconnecting, false);
+  assert.equal(back.ready, true);
+});
+
+test('watchdog backs off while the scanner stays absent, then reconnects on return', async () => {
+  const wd = createWatchdogManager([POS_INTERFACE]);
+  const devices = await wd.manager.listDevices();
+  const posKey = devices.find((d) => d.usagePage === 0x8c)!.key;
+  await wd.manager.selectDevice(posKey);
+
+  wd.setDevices([]); // unplugged before the error fires
+  wd.fireError('pos-interface-path');
+  await flushMicrotasks();
+  assert.equal(wd.lastDelay(), 2_000);
+
+  await wd.runNextTimer(); // still absent → back off to 5s
+  assert.equal(wd.manager.getStatus().hidState, 'RECONNECTING');
+  assert.equal(wd.lastDelay(), 5_000);
+
+  await wd.runNextTimer(); // still absent → 10s
+  assert.equal(wd.lastDelay(), 10_000);
+
+  wd.setDevices([POS_INTERFACE]); // replugged
+  await wd.runNextTimer();
+  assert.equal(wd.manager.getStatus().hidState, 'CAPTURING');
+  assert.equal(wd.pendingTimers(), 0, 'no further reconnect scheduled');
+});
+
+test('switching to wedge cancels the reconnect watchdog', async () => {
+  const wd = createWatchdogManager([POS_INTERFACE]);
+  const devices = await wd.manager.listDevices();
+  const posKey = devices.find((d) => d.usagePage === 0x8c)!.key;
+  await wd.manager.selectDevice(posKey);
+  wd.setDevices([]);
+  wd.fireError('pos-interface-path');
+  await flushMicrotasks();
+  assert.equal(wd.pendingTimers(), 1);
+
+  const wedge = await wd.manager.useWedgeMode();
+  assert.equal(wedge.mode, 'WEDGE');
+  assert.equal(wedge.ready, true);
+  assert.equal(wedge.reconnecting, false);
+  assert.equal(wd.pendingTimers(), 0, 'watchdog timer cleared');
+});
+
+test('readiness status carries no raw path/serial even across reconnect', async () => {
+  const wd = createWatchdogManager([{ ...POS_INTERFACE, serialNumber: 'SECRETSERIAL42' }]);
+  const devices = await wd.manager.listDevices();
+  const posKey = devices.find((d) => d.usagePage === 0x8c)!.key;
+  await wd.manager.selectDevice(posKey);
+  wd.fireError('pos-interface-path');
+  await flushMicrotasks();
+  await wd.runNextTimer();
+  const json = JSON.stringify({ devices, status: wd.manager.getStatus() });
+  assert.doesNotMatch(json, /pos-interface-path/);
+  assert.doesNotMatch(json, /SECRETSERIAL42/);
 });

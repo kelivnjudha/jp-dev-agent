@@ -34,7 +34,14 @@ import {
 
 export type ScannerCaptureMode = 'WEDGE' | 'HID_RAW';
 
-export type HidCaptureState = 'IDLE' | 'CAPTURING' | 'ERROR' | 'UNAVAILABLE';
+export type HidCaptureState =
+  | 'IDLE'
+  | 'CAPTURING'
+  | 'RECONNECTING'
+  | 'ERROR'
+  | 'UNAVAILABLE';
+
+export type ScannerCaptureSource = 'HID' | 'WEDGE';
 
 /** Safe, renderer-visible status. Never contains paths, serials,
  *  report bytes, or scan values. */
@@ -46,6 +53,13 @@ export interface ScannerCaptureStatus {
    *  the renderer so the codes themselves remain log-safe. */
   hidReasonCode: string | null;
   selectedDevice: ScannerHidPreference | null;
+  /** True when scans WILL be captured: HID_RAW while CAPTURING, or any
+   *  WEDGE mode (the JPPOS keyboard-wedge fallback covers it). */
+  ready: boolean;
+  /** Which path is actively capturing. */
+  captureSource: ScannerCaptureSource;
+  /** Watchdog is retrying a dropped HID device. */
+  reconnecting: boolean;
 }
 
 interface NodeHidDeviceLike {
@@ -74,7 +88,13 @@ export interface HidCaptureManagerOptions {
   /** Module loader hook for tests; defaults to importing node-hid. */
   loadModule?: () => Promise<NodeHidModuleLike>;
   platform?: NodeJS.Platform;
+  /** Watchdog timer injection for tests; default global setTimeout. */
+  setTimer?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }
+
+// Watchdog reconnect backoff (ms): 2s → 5s → 10s → 30s (then 30s).
+const HID_RECONNECT_DELAYS_MS = [2_000, 5_000, 10_000, 30_000] as const;
 
 const defaultLoadModule = async (): Promise<NodeHidModuleLike> => {
   const mod = (await import('node-hid')) as unknown as
@@ -95,9 +115,16 @@ export class HidCaptureManager {
   private modulePromise: Promise<NodeHidModuleLike> | null = null;
   private moduleUnavailable = false;
   private readonly platform: NodeJS.Platform;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private reconnecting = false;
+  private readonly setTimer: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private readonly clearTimer: (handle: ReturnType<typeof setTimeout>) => void;
 
   constructor(private readonly options: HidCaptureManagerOptions) {
     this.platform = options.platform ?? process.platform;
+    this.setTimer = options.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
+    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
   }
 
   private async loadHid(): Promise<NodeHidModuleLike | null> {
@@ -113,12 +140,18 @@ export class HidCaptureManager {
   }
 
   getStatus(): ScannerCaptureStatus {
+    const hidActive = this.mode === 'HID_RAW' && this.hidState === 'CAPTURING';
     return {
       mode: this.mode,
       hidSupported: !this.moduleUnavailable,
       hidState: this.hidState,
       hidReasonCode: this.hidReasonCode,
       selectedDevice: this.selectedDevice,
+      // WEDGE mode is always "ready" because JPPOS's keyboard-wedge
+      // fallback captures it; HID_RAW is ready only while capturing.
+      ready: this.mode === 'WEDGE' ? true : hidActive,
+      captureSource: hidActive ? 'HID' : 'WEDGE',
+      reconnecting: this.reconnecting,
     };
   }
 
@@ -163,12 +196,27 @@ export class HidCaptureManager {
   }
 
   /** Open the device behind a selection key from the LAST discovery
-   *  and switch to HID_RAW capture. Falls back safely on failure. */
+   *  and switch to HID_RAW capture. A manual select cancels any active
+   *  reconnect watchdog and resets its backoff. */
   async selectDevice(key: unknown): Promise<ScannerCaptureStatus> {
     if (typeof key !== 'string' || !/^[0-9a-f]{4}:[0-9a-f]{4}:[0-9a-f]{8}$/u.test(key)) {
       this.hidReasonCode = 'HID_SELECTION_INVALID';
       return this.getStatus();
     }
+    this.stopReconnect();
+    const status = await this.openDeviceByKey(key);
+    if (status.hidState === 'CAPTURING') {
+      this.options.persistPreference({
+        mode: this.mode,
+        device: this.selectedDevice,
+      });
+    }
+    return status;
+  }
+
+  /** Low-level open used by both manual select and the watchdog. Does
+   *  NOT persist or touch the reconnect backoff. */
+  private async openDeviceByKey(key: string): Promise<ScannerCaptureStatus> {
     const path = this.pathsByKey.get(key);
     if (!path) {
       this.hidReasonCode = 'HID_DEVICE_NOT_FOUND';
@@ -205,23 +253,108 @@ export class HidCaptureManager {
       assembler.pushReport(data);
     });
     device.on('error', () => {
-      // Device unplugged or read failure — drop to a safe error state;
-      // the wedge harness keeps working and the UI shows the reason.
-      void this.closeOpenDevice();
-      this.hidState = 'ERROR';
-      this.hidReasonCode = 'HID_DEVICE_DISCONNECTED';
+      // Device unplugged or read failure — close and let the watchdog
+      // retry with backoff; the wedge harness keeps working meanwhile.
+      void this.handleHidDisconnect();
     });
 
     this.openDevice = device;
     this.mode = 'HID_RAW';
     this.hidState = 'CAPTURING';
     this.hidReasonCode = null;
+    this.reconnecting = false;
     this.selectedDevice = this.preferenceForKey(key);
-    this.options.persistPreference({
-      mode: this.mode,
-      device: this.selectedDevice,
-    });
     return this.getStatus();
+  }
+
+  // ─── Watchdog: auto-reconnect a dropped HID scanner ──────────────
+
+  private async handleHidDisconnect(): Promise<void> {
+    await this.closeOpenDevice();
+    if (this.mode !== 'HID_RAW') return; // operator switched to wedge
+    this.hidState = 'RECONNECTING';
+    this.hidReasonCode = 'HID_DEVICE_DISCONNECTED';
+    this.reconnecting = true;
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== null || this.mode !== 'HID_RAW') return;
+    const index = Math.min(
+      this.reconnectAttempt,
+      HID_RECONNECT_DELAYS_MS.length - 1,
+    );
+    const delay = HID_RECONNECT_DELAYS_MS[index]!;
+    this.reconnectTimer = this.setTimer(() => {
+      this.reconnectTimer = null;
+      void this.attemptReconnect();
+    }, delay);
+  }
+
+  /** One reconnect tick: re-discover, and re-open the saved scanner if
+   *  a single unambiguous match is present; otherwise back off. */
+  async attemptReconnect(): Promise<ScannerCaptureStatus> {
+    if (this.mode !== 'HID_RAW' || !this.selectedDevice) {
+      this.reconnecting = false;
+      return this.getStatus();
+    }
+    const preference = this.selectedDevice;
+    const match = await this.findUniqueMatchKey(preference);
+    if (match.kind !== 'unique') {
+      this.hidReasonCode =
+        match.kind === 'ambiguous' ? 'HID_MULTIPLE_MATCHES' : 'HID_DEVICE_DISCONNECTED';
+      this.reconnectAttempt += 1;
+      this.scheduleReconnect();
+      return this.getStatus();
+    }
+    const status = await this.openDeviceByKey(match.key);
+    if (status.hidState === 'CAPTURING') {
+      if (preference.product) {
+        this.selectedDevice = { ...preference };
+      }
+      this.reconnectAttempt = 0;
+      this.reconnecting = false;
+      this.options.persistPreference({
+        mode: this.mode,
+        device: this.selectedDevice,
+      });
+    } else {
+      this.reconnectAttempt += 1;
+      this.reconnecting = true;
+      this.scheduleReconnect();
+    }
+    return this.getStatus();
+  }
+
+  private stopReconnect(): void {
+    if (this.reconnectTimer !== null) {
+      this.clearTimer(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    this.reconnecting = false;
+  }
+
+  /** Find the single openable interface matching a saved preference. */
+  private async findUniqueMatchKey(
+    preference: ScannerHidPreference,
+  ): Promise<{ kind: 'unique'; key: string } | { kind: 'none' } | { kind: 'ambiguous' }> {
+    const devices = await this.listDevices();
+    const matches = devices.filter(
+      (device) =>
+        device.vendorId === preference.vendorId
+        && device.productId === preference.productId,
+    );
+    if (matches.length === 0) return { kind: 'none' };
+    // A single physical scanner usually exposes several interfaces
+    // (keyboard collection + HID-POS collection) — prefer the openable
+    // scanner-class one.
+    const preferred = matches.filter(
+      (device) => device.likelyScanner && !device.keyboardClass,
+    );
+    const candidates = preferred.length > 0 ? preferred : matches;
+    if (candidates.length > 1) return { kind: 'ambiguous' };
+    return { kind: 'unique', key: candidates[0]!.key };
   }
 
   /** Build the persistable (safe-fields-only) preference for a key. */
@@ -241,38 +374,33 @@ export class HidCaptureManager {
    *      units — are NEVER auto-picked: the bench asks the operator
    *      to choose, instead of silently capturing the wrong unit. */
   async restorePreference(preference: ScannerHidPreference): Promise<ScannerCaptureStatus> {
-    const devices = await this.listDevices();
-    const matches = devices.filter(
-      (device) =>
-        device.vendorId === preference.vendorId
-        && device.productId === preference.productId,
-    );
-    if (matches.length === 0) {
+    this.selectedDevice = { ...preference };
+    const match = await this.findUniqueMatchKey(preference);
+    if (match.kind === 'none') {
+      // Saved scanner not plugged in — wedge fallback stays ready.
+      this.mode = 'WEDGE';
       this.hidState = 'IDLE';
-      this.hidReasonCode = 'HID_PREFERRED_DEVICE_ABSENT';
+      this.hidReasonCode = 'NO_SCANNER';
       return this.getStatus();
     }
-    // A single physical scanner usually enumerates several interfaces
-    // (keyboard collection + HID-POS collection) with the same ids —
-    // prefer the openable scanner-class interface.
-    const preferred = matches.filter(
-      (device) => device.likelyScanner && !device.keyboardClass,
-    );
-    const candidates = preferred.length > 0 ? preferred : matches;
-    if (candidates.length > 1) {
+    if (match.kind === 'ambiguous') {
+      // Two identical units — never guess; ask the operator to pick.
+      this.mode = 'WEDGE';
       this.hidState = 'IDLE';
-      this.hidReasonCode = 'HID_MULTIPLE_MATCHES';
+      this.hidReasonCode = 'SELECT_SCANNER';
       return this.getStatus();
     }
-    const status = await this.selectDevice(candidates[0]!.key);
-    if (status.selectedDevice && preference.product) {
-      this.selectedDevice = { ...status.selectedDevice, product: preference.product };
+    const status = await this.selectDevice(match.key);
+    if (status.hidState === 'CAPTURING' && preference.product) {
+      this.selectedDevice = { ...preference };
     }
     return this.getStatus();
   }
 
-  /** Fall back to the keyboard-wedge harness; closes any open device. */
+  /** Fall back to the keyboard-wedge harness; closes any open device
+   *  and cancels the reconnect watchdog. */
   async useWedgeMode(): Promise<ScannerCaptureStatus> {
+    this.stopReconnect();
     await this.closeOpenDevice();
     this.mode = 'WEDGE';
     this.hidState = 'IDLE';
@@ -282,6 +410,7 @@ export class HidCaptureManager {
   }
 
   async dispose(): Promise<void> {
+    this.stopReconnect();
     await this.closeOpenDevice();
   }
 

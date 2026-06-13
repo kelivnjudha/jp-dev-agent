@@ -601,6 +601,10 @@ const HID_REASON_COPY: Record<string, string> = {
     'The previously selected scanner is not connected. Keyboard Wedge stays active.',
   HID_MULTIPLE_MATCHES:
     'Several matching scanners are connected — detect devices and choose one manually.',
+  NO_SCANNER:
+    'No scanner detected — keyboard-wedge fallback is ready in JPPOS while the cashier is open.',
+  SELECT_SCANNER:
+    'Select scanner — two matching units are connected; detect devices and pick one.',
 };
 
 function hex4(value: number): string {
@@ -619,25 +623,32 @@ function renderCaptureStatus(status: ScannerCaptureStatus): void {
       ? `${device.product ?? 'HID device'} (${hex4(device.vendorId)}:${hex4(device.productId)})`
       : 'None',
   );
-  if (status.hidState === 'CAPTURING') {
+  if (status.reconnecting || status.hidState === 'RECONNECTING') {
     setText(
       scannerHidStatus,
-      'HID capture active — test scan now; scans route to POS even while JPPOS is focused.',
+      'Scanner disconnected — reconnecting automatically. Keyboard wedge still works.',
     );
     return;
   }
+  if (status.captureSource === 'HID' && status.hidState === 'CAPTURING') {
+    setText(
+      scannerHidStatus,
+      'HID scanner active — scans route to POS even while JPPOS is focused.',
+    );
+    return;
+  }
+  // Wedge mode is the steady, "ready" state — show the reason hint if
+  // an HID attempt fell back, otherwise the plain ready copy.
   if (status.hidReasonCode) {
     setText(
       scannerHidStatus,
-      HID_REASON_COPY[status.hidReasonCode] ?? `Not capturing (${status.hidReasonCode}).`,
+      HID_REASON_COPY[status.hidReasonCode] ?? `Keyboard-wedge scanner ready in JPPOS (${status.hidReasonCode}).`,
     );
     return;
   }
   setText(
     scannerHidStatus,
-    status.mode === 'WEDGE'
-      ? 'Keyboard Wedge mode — focus the capture field above to scan.'
-      : '',
+    'Keyboard-wedge scanner ready in JPPOS — scans work while the cashier screen is open. Switch the scanner to HID-POS mode for focus-independent agent capture.',
   );
 }
 
